@@ -355,11 +355,46 @@ function todosMovs() { const vistos = new Set(); const out = [];
   return out.sort((a, b) => b.ts - a.ts || (b.seq || 0) - (a.seq || 0)); }
 /* ===================== STORAGE ===================== */
 const LOCAL = { get() { const d = ls('local', null); return (d && typeof d === 'object') ? { movs: d.movs || {}, cfgSkus: d.cfgSkus || {}, cfgKits: d.cfgKits || {}, cfgGeral: d.cfgGeral || {}, arqs: d.arqs || {} } : { movs: {}, cfgSkus: {}, cfgKits: {}, cfgGeral: {}, arqs: {} }; }, set(d) { lsSet('local', d); } };
+/* ===== BANCO COMPARTILHADO SEM CLAUDE (/api/db sobre Vercel Blob) ===== */
+const API = '/api/db';
+let apiTimer = null, apiOcupado = false;
+async function apiGet(ms = 12000) {
+  const ac = new AbortController(); const t = setTimeout(() => ac.abort(), ms);
+  try { const r = await fetch(API + '?t=' + Date.now(), { signal: ac.signal, cache: 'no-store' }); if (!r.ok) return null; const j = await r.json(); return j && j.ok ? j : null; }
+  catch (e) { return null; } finally { clearTimeout(t); }
+}
+async function apiPost(corpo, ms = 20000) {
+  const ac = new AbortController(); const t = setTimeout(() => ac.abort(), ms);
+  try {
+    const r = await fetch(API, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(corpo), signal: ac.signal });
+    const j = await r.json().catch(() => null);
+    if (!r.ok || !j || !j.ok) { const e = new Error((j && j.erro) || ('erro ' + r.status)); e.code = r.status >= 500 ? 'unavailable' : 'invalid_argument'; throw e; }
+    return j;
+  } catch (e) { if (e.name === 'AbortError') { const x = new Error('o servidor demorou a responder'); x.code = 'unavailable'; throw x; } throw e; }
+  finally { clearTimeout(t); }
+}
+function apiAplica(j) {
+  S.movs = j.movs || {}; S.arqs = j.arqs || {};
+  const c = j.cfg || {};
+  S.cfgSkus = c.skus || {}; S.cfgKits = c.kits || {}; S.cfgGeral = c.geral || {};
+  const it = {}; for (const [k, v] of Object.entries((j.cnt && j.cnt.itens) || {})) if (v != null && SAFE_KEY(k)) it[k] = v;
+  const digitando = document.activeElement && document.activeElement.closest && document.activeElement.closest('.crow');
+  if (!digitando) S.contRasc = it;
+  recompute();
+}
+async function apiSync(silencioso) {
+  if (apiOcupado) return; apiOcupado = true;
+  try { const j = await apiGet(); if (j) { apiAplica(j); if (S.mode !== 'api') { S.mode = 'api'; } renderStatus(); render(); if (!flushed) { flushed = true; flushPend(); } } else if (!silencioso) { S.mode = 'err'; renderStatus(); render(); } }
+  finally { apiOcupado = false; }
+}
+function apiPoll() { if (apiTimer) clearInterval(apiTimer); apiTimer = setInterval(() => { if (!document.hidden && !$('#sheet')) apiSync(true); }, 9000); }
 async function connect() {
   let db = null;
   try { if (window.claude && typeof window.claude.use === 'function') db = await window.claude.use('db'); } catch (e) { db = null; }
-  if (db) { S.db = db; S.mode = 'db'; subscribeDb(); }
-  else { S.mode = 'local'; loadLocal(); }
+  if (db) { S.db = db; S.mode = 'db'; subscribeDb(); renderStatus(); render(); return; }
+  const j = await apiGet(8000);
+  if (j) { S.mode = 'api'; apiAplica(j); apiPoll(); renderStatus(); render(); flushed = true; flushPend(); return; }
+  S.mode = 'local'; loadLocal();
   renderStatus(); render();
 }
 let flushed = false, gotMov = false, gotArq = false;
@@ -383,34 +418,40 @@ function erroTxt(e) {
 }
 function guardarLocal(mov) { const l = LOCAL.get(); l.movs[mov.id] = mov; LOCAL.set(l); S.movs[mov.id] = mov; if (!S.pend.includes(mov.id)) S.pend.push(mov.id); lsSet('pend', S.pend); recompute(); }
 async function putMov(mov) {
-  if (S.mode !== 'db') { guardarLocal(mov); return { local: true }; }
-  try { await withRetry(() => S.db.doc('mov/' + mov.id).set(mov)); return {}; }
-  catch (e) {
+  if (S.mode !== 'db' && S.mode !== 'api') { guardarLocal(mov); return { local: true }; }
+  try {
+    if (S.mode === 'api') await apiPost({ op: 'mov', mov });
+    else await withRetry(() => S.db.doc('mov/' + mov.id).set(mov));
+    return {};
+  } catch (e) {
     if (e && (e.code === 'unavailable' || e.code === 'resource_exhausted')) { guardarLocal(mov); flushed = false; return { local: true, motivo: erroTxt(e) }; }
     throw e;
   }
 }
 async function patchMov(id, patch) {
-  if (S.mode === 'db') { await withRetry(() => S.db.doc('mov/' + id).update(patch)); }
-  else { if (S.movs[id]) S.movs[id] = { ...S.movs[id], ...patch }; saveLocal(); }
+  if (S.mode === 'db') { await withRetry(() => S.db.doc('mov/' + id).update(patch)); return; }
+  if (S.mode === 'api') { await apiPost({ op: 'patchMov', id, patch }); if (S.movs[id]) S.movs[id] = { ...S.movs[id], ...patch }; return; }
+  if (S.movs[id]) S.movs[id] = { ...S.movs[id], ...patch }; saveLocal();
 }
 const cfgExists = {};
 async function patchCfg(name, patch) { // merge-write one cfg doc (update per field; set if missing)
   const key = { skus: 'cfgSkus', kits: 'cfgKits', geral: 'cfgGeral' }[name];
   const cur = { ...S[key] }; for (const [k, v] of Object.entries(patch)) { if (!SAFE_KEY(k)) continue; if (v == null) delete cur[k]; else cur[k] = (cur[k] && typeof cur[k] === 'object' && typeof v === 'object') ? { ...cur[k], ...v } : v; }
   S[key] = cur;
+  if (S.mode === 'api') { await apiPost({ op: 'cfg', nome: name, data: cur }); return; }
   if (S.mode !== 'db') { saveLocal(); return; }
   const ref = S.db.doc('cfg/' + name);
   if (cfgExists[name] == null) { const snap = await ref.get(); cfgExists[name] = snap.exists; }
   if (!cfgExists[name]) { await withRetry(() => ref.set(cur)); cfgExists[name] = true; }
   else await withRetry(() => ref.update(patch));
 }
-async function flushPend() { // movements recorded while local -> upload (renumbered) once db is back
+async function flushPend() { // lançamentos feitos sem conexão sobem (renumerados) quando o banco volta
+  if (S.mode !== 'db' && S.mode !== 'api') return;
   const local = LOCAL.get(); const ids = (S.pend || []).filter(id => local.movs && local.movs[id]); if (!ids.length) { S.pend = []; lsSet('pend', []); return; }
   let ok = 0; const feitos = [];
   for (const id of ids.sort((a, b) => (local.movs[a].ts || 0) - (local.movs[b].ts || 0))) {
     const mov = { ...local.movs[id] }; const seqLocal = mov.seq; mov.seq = S.seqMax + 1; mov.seqLocal = seqLocal; mov.obs = ((mov.obs || '') + ` (lançado sem conexão como #${pad(seqLocal)})`).trim();
-    try { await withRetry(() => S.db.doc('mov/' + id).set(mov)); ok++; feitos.push(id); S.movs[id] = mov; recompute(); } catch (e) { console.error(e); }
+    try { if (S.mode === 'api') await apiPost({ op: 'mov', mov }); else await withRetry(() => S.db.doc('mov/' + id).set(mov)); ok++; feitos.push(id); S.movs[id] = mov; recompute(); } catch (e) { console.error(e); }
   }
   S.pend = (S.pend || []).filter(id => !feitos.includes(id)); lsSet('pend', S.pend);
   if (feitos.length) { const l = LOCAL.get(); for (const id of feitos) delete l.movs[id]; LOCAL.set(l); }
@@ -426,6 +467,7 @@ async function gravaCnt(patch) {
 }
 function contSet(patch) { // patch: {k: valor|null} — grava em fila, senão duas digitações seguidas se atropelam
   for (const [k, v] of Object.entries(patch)) { if (!SAFE_KEY(k)) continue; if (v == null) delete S.contRasc[k]; else S.contRasc[k] = v; }
+  if (S.mode === 'api') { const copia = { ...S.contRasc }; cntFila = cntFila.then(() => apiPost({ op: 'cnt', data: { itens: copia, atualizadoEm: new Date().toISOString(), por: S.autor || '' } })).catch(e => { console.error(e); toast('Rascunho da contagem não sincronizou: ' + erroTxt(e)); }); return cntFila; }
   if (S.mode !== 'db') { lsSet('contRasc', S.contRasc); return Promise.resolve(); }
   cntFila = cntFila.then(() => gravaCnt(patch)).catch(e => { console.error(e); toast('Rascunho da contagem não sincronizou: ' + erroTxt(e)); });
   return cntFila;
@@ -527,16 +569,17 @@ async function compartilhar(text) { if (navigator.share) { try { await navigator
 /* ===================== RENDER ===================== */
 function renderStatus() {
   const el = $('#st'); if (!el) return;
-  const map = { boot: ['', 'conectando…'], db: ['ok', 'sincronizado'], local: ['local', TEM_RUNTIME ? 'só neste aparelho' : 'versão aberta'], err: ['err', 'erro no banco'] };
+  const map = { boot: ['', 'conectando…'], db: ['ok', 'sincronizado'], api: ['ok', 'sincronizado'], local: ['local', TEM_RUNTIME ? 'só neste aparelho' : 'neste navegador'], err: ['err', 'sem conexão'] };
   const [cls, txt] = map[S.mode] || map.boot; el.className = 'st ' + cls; el.innerHTML = `<i></i><span>${esc(txt)}${S.autor ? ' · ' + esc(S.autor) : ''}</span>`;
 }
 function render() { const m = $('#main'); if (!m) return; const y = window.scrollY; document.querySelectorAll('.tab').forEach(b => { const on = b.dataset.tab === S.tab; b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); }); ({ lancar: renderLancar, estoque: renderEstoque, historico: renderHistorico, contagem: renderContagem })[S.tab](m); window.scrollTo(0, y); }
 const TEM_RUNTIME = !!(typeof window !== 'undefined' && window.claude && typeof window.claude.use === 'function');
 function bannerModo() {
+  if (S.mode === 'api') return !S.autor ? `<div class="banner g">Diga quem está lançando: <button id="b-autor">definir meu nome</button>. Ele vai em todas as mensagens.</div>` : '';
   if (S.mode === 'local') return TEM_RUNTIME
     ? `<div class="banner am">O banco compartilhado não respondeu: os lançamentos ficam <b>só neste aparelho</b> e sobem sozinhos quando ele voltar.${S.pend.length ? ` <b>${S.pend.length} esperando</b>.` : ''}</div>`
-    : `<div class="banner am">Esta é a <b>versão aberta</b>, para conhecer e testar: o que você lançar fica <b>só neste navegador</b> e não vai para lugar nenhum. O estoque de verdade, compartilhado entre as pessoas, é o app aberto pelo claude.ai.</div>`;
-  if (S.mode === 'err') return `<div class="banner rd">A conexão com o banco compartilhado caiu. <button id="b-recon">tentar de novo</button> — enquanto isso, não lance nada para não gravar em cima de saldo desatualizado.</div>`;
+    : `<div class="banner" style="border-color:var(--bd);background:var(--sf)"><b>Controle de estoque da 2Wheels.</b> Lance entradas e saídas por unidade, por caixa ou por caixa cheia, acompanhe o saldo de cada produto e gere a mensagem pronta para o grupo. Neste endereço o estoque fica guardado <b>neste navegador</b>.</div>`;
+  if (S.mode === 'err') return `<div class="banner rd">Sem conexão com o estoque compartilhado. <button id="b-recon">tentar de novo</button> — enquanto isso, não lance nada para não gravar em cima de saldo desatualizado.</div>`;
   if (!S.autor) return `<div class="banner g">Diga quem está lançando: <button id="b-autor">definir meu nome</button>. Ele vai em todas as mensagens.</div>`;
   return '';
 }
@@ -544,7 +587,8 @@ function bindAutor(m) { const ba = m.querySelector('#b-autor'); if (ba) ba.oncli
 async function reconectar() {
   for (const u of S.unsub) { try { u(); } catch (e) { } }
   S.unsub = []; flushed = false; gotMov = false; gotArq = false; S.mode = 'boot'; renderStatus(); render();
-  try { if (S.db) { subscribeDb(); toast('Reconectando…'); } else await connect(); } catch (e) { S.mode = 'err'; renderStatus(); render(); toast('Não reconectou: ' + erroTxt(e)); }
+  try { if (S.db) { subscribeDb(); toast('Reconectando…'); } else { await connect(); if (S.mode === 'api') { apiPoll(); toast('Conectado.'); } } }
+  catch (e) { S.mode = 'err'; renderStatus(); render(); toast('Não reconectou: ' + erroTxt(e)); }
 }
 /* ---------- LANÇAR ---------- */
 function isAJ() { return S.cart.dir === 'AJ'; }
@@ -725,7 +769,7 @@ function bindLancar(m) {
 function bindQx(m) { const x = m.querySelector('#qx'); if (x) x.onclick = () => { S.q = ''; render(); const q = $('#q'); if (q) q.focus(); }; }
 function bindRes(m) { m.querySelectorAll('[data-add]').forEach(b => b.onclick = () => openQty(b.dataset.add)); m.querySelectorAll('[data-addkit]').forEach(b => b.onclick = () => openKitQty(b.dataset.addkit)); }
 function prontoParaGravar() {
-  if (S.mode === 'local') return true;
+  if (S.mode === 'local' || S.mode === 'api') return true;
   if (S.mode === 'err') { toast('A conexão com o banco caiu. Toque em "tentar de novo" no aviso vermelho antes de lançar.'); return false; }
   if (S.mode !== 'db' || !gotMov || !gotArq) { toast('Ainda carregando os lançamentos do banco — um instante.'); return false; }
   return true;
@@ -959,13 +1003,14 @@ function renderContagem(m) {
 function openCfg() {
   const nDocs = Object.keys(S.movs).length + Object.keys(S.arqs).length + 4;
   sheet(`<div class="hd"><h2>Ajustes</h2><button class="xbtn" data-close aria-label="Fechar">✕</button></div>
-  <div class="kv"><span>Quem lança</span><span class="v">${esc(S.autor || '—')}</span><span>Conexão</span><span>${S.mode === 'db' ? 'banco compartilhado (sincronizado)' : S.mode === 'local' ? 'só neste aparelho' : esc(S.mode)}</span><span>Lançamentos vivos</span><span class="num">${fmt(Object.keys(S.movs).length)} (limite do banco ≈ 4.900 documentos; hoje ${fmt(nDocs)})</span><span>Último nº</span><span class="num">#${pad(S.seqMax)}</span><span>Catálogo</span><span>${CAT.skus.length} SKUs · ${CAT.kits.length} kits · versão ${esc(CAT.versao)}</span></div>
+  <div class="kv"><span>Quem lança</span><span class="v">${esc(S.autor || '—')}</span><span>Conexão</span><span>${S.mode === 'db' || S.mode === 'api' ? 'estoque compartilhado (sincronizado)' : S.mode === 'local' ? 'só neste aparelho' : 'sem conexão'}</span><span>Lançamentos vivos</span><span class="num">${fmt(Object.keys(S.movs).length)} (limite do banco ≈ 4.900 documentos; hoje ${fmt(nDocs)})</span><span>Último nº</span><span class="num">#${pad(S.seqMax)}</span><span>Catálogo</span><span>${CAT.skus.length} SKUs · ${CAT.kits.length} kits · versão ${esc(CAT.versao)}</span></div>
   <div class="acts"><button class="btn" id="c-autor">Trocar nome</button><button class="btn" id="c-kits">Kits</button><button class="btn" id="c-cx">Unidades por caixa</button></div>
   <div class="acts two"><button class="btn" id="c-min">Estoque mínimo</button><button class="btn" id="c-csv">Exportar CSV</button></div>
   <h3>Manutenção</h3>
   <div class="hint">Quando o histórico crescer, <b>Fechar período</b> compacta os lançamentos anteriores a uma data num único registro de arquivo (com os saldos daquele momento). O histórico continua visível; só deixa de ocupar um documento por lançamento.</div>
   <div class="row"><input class="textin grow" id="c-data" type="date" aria-label="Fechar até a data"><button class="btn" id="c-fechar">Fechar período</button></div>
-  ${S.mode === 'local' ? `<div class="hint">Este aparelho está com os dados só aqui, sem banco compartilhado — é assim que funciona a versão aberta, para conferir o app sem conta.</div><button class="btn dg w" id="c-zerar">Apagar tudo deste aparelho</button>` : ''}
+  ${S.mode === 'local' ? `<div class="hint">Neste endereço o estoque é guardado no próprio navegador, sem banco compartilhado.</div><button class="btn dg w" id="c-zerar">Apagar tudo deste aparelho</button>` : ''}
+  ${S.mode === 'api' ? `<div class="hint">Estoque compartilhado: todo mundo que abre este endereço vê e lança no mesmo saldo. A tela se atualiza sozinha a cada poucos segundos.</div>` : ''}
   <div class="hint xs">Catálogo: loja Tray (web_api), tabela B2B 2026 e cadastro GS1 de códigos de barras. "Caixa cheia" é a caixa padrão de estoque; as unidades por caixa cheia são definidas por vocês tocando no produto na aba Estoque.</div>`);
   const sh = $('#sheet');
   sh.querySelector('#c-autor').onclick = () => openAutor();
@@ -1022,8 +1067,8 @@ function openCsv() {
 }
 async function fecharPeriodo(dataStr) {
   if (!dataStr) { toast('Escolha a data.'); return; }
-  if (S.mode !== 'db') { toast('Fechar período só com o banco compartilhado conectado.'); return; }
-  if (!gotMov || !gotArq) { toast('Ainda carregando o banco — tente daqui a pouco.'); return; }
+  if (S.mode !== 'db' && S.mode !== 'api') { toast('Fechar período só com o banco compartilhado conectado.'); return; }
+  if (S.mode === 'db' && (!gotMov || !gotArq)) { toast('Ainda carregando o banco — tente daqui a pouco.'); return; }
   if (S.pend.length) { toast('Há lançamentos feitos sem conexão ainda subindo. Espere sincronizar.'); return; }
   const ate = new Date(dataStr + 'T23:59:59').getTime(); if (!Number.isFinite(ate)) { toast('Data inválida.'); return; }
   const base = baseArq(); if (base && ate <= base.ate) { toast('Já existe um fechamento até ' + new Date(base.ate).toLocaleDateString('pt-BR') + '. Escolha uma data posterior.'); return; }
@@ -1036,10 +1081,16 @@ async function fecharPeriodo(dataStr) {
   const json = JSON.stringify(arq); const bytes = (typeof TextEncoder !== 'undefined') ? new TextEncoder().encode(json).length : json.length * 2;
   if (bytes > 220000) { toast('Período grande demais para um único arquivo (' + Math.round(bytes / 1024) + ' KB). Escolha uma data mais próxima.'); return; }
   try {
-    await withRetry(() => S.db.doc('arq/' + arq.id).set(arq));
-    const sobras = [];
-    for (const m of movs) { try { await withRetry(() => S.db.doc('mov/' + m.id).delete()); delete S.movs[m.id]; } catch (e) { console.error(e); sobras.push(m.seq); } }
-    S.arqs[arq.id] = arq; recompute(); closeSheet(true); render();
+    let sobras = [];
+    if (S.mode === 'api') {
+      const r = await apiPost({ op: 'arq', arq, apagar: movs.map(m => m.id) }, 60000);
+      const falhou = new Set(r.sobras || []);
+      for (const m of movs) if (!falhou.has(m.id)) delete S.movs[m.id]; else sobras.push(m.seq);
+    } else {
+      await withRetry(() => S.db.doc('arq/' + arq.id).set(arq));
+      for (const m of movs) { try { await withRetry(() => S.db.doc('mov/' + m.id).delete()); delete S.movs[m.id]; } catch (e) { console.error(e); sobras.push(m.seq); } }
+    }
+    S.arqs[arq.id] = arq; recompute(); closeSheet(true); render(); if (S.mode === 'api') apiSync(true);
     toast(sobras.length ? `Arquivado, mas ${sobras.length} lançamento(s) não saíram da lista (#${sobras.slice(0, 3).map(s => pad(s)).join(', #')}). Tente fechar de novo.` : `${movs.length} lançamentos arquivados`);
   } catch (e) {
     if (e && e.code === 'quota_exceeded') toast('O banco está cheio e nem o arquivo cabe. Exporte o CSV em Ajustes e apague alguns lançamentos antigos pelo histórico antes de fechar o período.');
