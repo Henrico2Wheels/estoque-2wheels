@@ -266,7 +266,22 @@ function minDe(k) { const c = skuCfg(k); return c.min != null ? c.min : null; }
 function ativo(k) { const c = skuCfg(k); if (c.ativo != null) return !!c.ativo; return !!(SKU[k] && SKU[k].a); }
 function nomeSku(k) { const s = SKU[k]; return s ? s.n : String(k); }
 function kitComp(kk) { const c = SAFE_KEY(kk) && S.cfgKits[kk]; if (c && Array.isArray(c.itens) && c.itens.length) return { itens: c.itens.filter(x => x && SKU[x.k]).map(x => ({ k: x.k, q: Math.max(1, num(x.q)) })), ok: true }; const k = KIT[kk]; if (k && k.c && k.c.length && (k.conf === 'alta' || k.conf === 'media')) return { itens: k.c.map(x => ({ k: x.k, q: x.q })), ok: true }; return { itens: (k && k.c || []).map(x => ({ k: x.k, q: x.q })), ok: false }; }
-function kitsMontaveis() { const out = []; for (const kk of Object.keys(KIT)) { const c = kitComp(kk); if (!c.ok || !c.itens.length) continue; let m = Infinity; for (const it of c.itens) { const s = S.saldos[it.k]; if (s == null) { m = null; break; } m = Math.min(m, Math.floor(Math.max(0, s) / it.q)); } out.push({ kk, n: m === Infinity ? null : m }); } return out; }
+function kitsMontaveis() {
+  const out = [];
+  for (const kk of Object.keys(KIT)) {
+    const c = kitComp(kk); if (!c.ok || !c.itens.length) continue;
+    let m = Infinity, incerto = false;
+    for (const it of c.itens) {
+      const un = S.saldos[it.k], cx = S.saldosCx[it.k];
+      if (un == null && cx == null) { m = null; break; }           // nunca contado
+      const t = totalUn(it.k, un, cx);                              // soma as caixas cheias se a quantidade for conhecida
+      if (t == null) { incerto = true; m = Math.min(m, Math.floor(Math.max(0, un || 0) / it.q)); } // caixa sem quantidade: conta só o solto
+      else m = Math.min(m, Math.floor(Math.max(0, t) / it.q));
+    }
+    out.push({ kk, n: m === Infinity ? null : m, incerto: m != null && incerto });
+  }
+  return out;
+}
 function skusVisiveis() { return CAT.skus.filter(s => ativo(s.k) || S.mostrarOcultos); }
 function thumb(k, lg) { const t = THUMBS[k]; if (t) return `<img class="th${lg ? ' lg' : ''}" src="${t}" alt="" loading="lazy">`; const s = SKU[k] || KIT[k]; return `<span class="th ph${lg ? ' lg' : ''}">${esc((s && s.n || '?').slice(0, 2).toUpperCase())}</span>`; }
 function toast(msg, act, fn) { const old = $('.toast'); if (old) old.remove(); const t = document.createElement('div'); t.className = 'toast'; t.setAttribute('role', 'status'); t.innerHTML = `<span>${esc(msg)}</span>${act ? `<button>${esc(act)}</button>` : ''}`; if (act) t.querySelector('button').onclick = () => { t.remove(); fn && fn(); }; document.body.appendChild(t); setTimeout(() => t.remove(), act ? 8000 : 3200); }
@@ -441,8 +456,10 @@ function msgMov(m, comSaldo) {
   for (const l of CAT.linhas) { const arr = byLinha[l.k]; if (!arr || !arr.length) continue; lines.push(B(l.n)); for (const it of arr) { lines.push(fmtIt(it)); for (const a of accBy[it.k] || []) lines.push(fmtAcc(a)); } }
   const outros = solto.filter(it => !CAT.linhas.some(l => l.k === linhaDe(it.k))); if (outros.length) { lines.push(B('Outros')); for (const it of outros) lines.push(fmtIt(it)); }
   for (const [kk, g] of Object.entries(kitsIn)) { lines.push(`${B(fmt(g.q) + '× ' + (KIT[kk] ? KIT[kk].n : kk))}`); for (const it of g.itens) lines.push('  ↳ ' + fmtIt(it)); }
-  const tot = itens.reduce((a, it) => a + (it.d || 0), 0); const totCx = itens.reduce((a, it) => a + (it.dc || 0), 0); const nsk = new Set(itens.filter(it => !it.acc).map(it => it.k)).size;
-  lines.push('', `Total: ${nsk} SKU${nsk === 1 ? '' : 's'}${tot || !totCx ? ` · ${sign(tot)} un` : ''}${totCx ? ` · ${sign(totCx)} cx cheia${Math.abs(totCx) === 1 ? '' : 's'}` : ''}`);
+  const prod = itens.filter(it => !it.acc); const accs = itens.filter(it => it.acc);
+  const tot = prod.reduce((a, it) => a + (it.d || 0), 0); const totCx = prod.reduce((a, it) => a + (it.dc || 0), 0); const nsk = new Set(prod.map(it => it.k)).size;
+  const totAcc = accs.reduce((a, it) => a + Math.abs(it.d || 0), 0);
+  lines.push('', `Total: ${nsk} SKU${nsk === 1 ? '' : 's'}${tot || !totCx ? ` · ${sign(tot)} un` : ''}${totCx ? ` · ${sign(totCx)} cx cheia${Math.abs(totCx) === 1 ? '' : 's'}` : ''}${totAcc ? ` · ${fmt(totAcc)} acessório${totAcc === 1 ? '' : 's'} junto` : ''}`);
   if (comSaldo) {
     const z = new Set(), mn = new Set();
     for (const it of itens) { const s = saldoApos(m, it.k); const a = alerta(it.k, s.un, s.cx); if (a === 'zero') z.add(it.k); else if (a === 'min') mn.add(it.k); }
@@ -467,7 +484,7 @@ function msgEstoque() {
       lines.push(`${g === l.n ? '' : g + ': '}${parts.join(' · ')}`);
     }
   }
-  const km = kitsMontaveis().filter(x => x.n == null || x.n > 0); if (km.length) { lines.push(B('Kits montáveis com as unidades soltas')); for (const x of km) lines.push(`${KIT[x.kk].n}: ${x.n == null ? '?' : fmt(x.n)}`); }
+  const km = kitsMontaveis().filter(x => x.n == null || x.n > 0 || x.incerto); if (km.length) { lines.push(B('Kits montáveis com o saldo')); for (const x of km) lines.push(`${KIT[x.kk].n}: ${x.n == null ? '?' : fmt(x.n)}${x.incerto ? ' (no mínimo — há caixas sem quantidade)' : ''}`); }
   lines.push('', `Total: ${n} SKUs · ${fmt(tot)} un${totCx ? ` ${totCx < 0 ? 'e' : '+'} ${fmt(totCx)} cx cheias` : ''}${low ? ` · ${low} abaixo do mínimo` : ''}${zero ? ` · ${zero} zerado${zero === 1 ? '' : 's'}` : ''}${semc ? ` · ${semc} sem contagem` : ''}`);
   if (totCx) lines.push('_cx = caixas cheias (caixa padrão fechada)_');
   return lines.join('\n');
@@ -537,7 +554,7 @@ function renderLancar(m) {
   </div>
   ${c.dir !== 'AJ' ? `<div class="chips" aria-label="Motivo">${motivos.map(x => `<button class="chip ${c.motivo === x ? 'on' + (c.dir === 'S' ? ' p' : '') : ''}" data-motivo="${esc(x)}">${esc(x)}</button>`).join('')}</div>` : `<div class="hint">Ajuste corrige o saldo sem venda nem produção: você informa o <b>novo saldo</b> e o app grava a diferença. Para contar uma prateleira inteira, use a aba <b>Contagem</b>.</div>`}
   ${canais ? `<div class="chips" aria-label="Canal ou destino">${canais.map(x => `<button class="chip sm ${c.canal === x ? 'on' + (c.dir === 'S' ? ' p' : '') : ''}" data-canal="${esc(x)}">${esc(x)}</button>`).join('')}</div>` : ''}
-  <div class="search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="q" type="search" placeholder="Produto, tamanho, código ou EAN…" value="${esc(S.q)}" autocomplete="off" enterkeyhint="search" aria-label="Buscar produto">${S.q ? '<button class="x" id="qx" aria-label="Limpar busca">✕</button>' : ''}</div>
+  <div class="search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="q" type="search" placeholder="Produto, tamanho, linha ou código…" value="${esc(S.q)}" autocomplete="off" enterkeyhint="search" aria-label="Buscar produto">${S.q ? '<button class="x" id="qx" aria-label="Limpar busca">✕</button>' : ''}</div>
   <div class="chips" aria-label="Linha">${['', ...CAT.linhas.map(l => l.k)].map(k => `<button class="chip sm ${S.fam === k ? 'on' : ''}" data-fam="${k}">${k ? esc(LINHA[k]) : 'Tudo'}</button>`).join('')}</div>
   <div class="list" id="res">${res.html}</div>
   ${c.itens.length ? `<h3>Cesta · ${n} ${n === 1 ? 'item' : 'itens'} · ${fmt(un)} un${cx ? ` + ${fmt(cx)} cx cheia${cx === 1 ? '' : 's'}` : ''}</h3><div class="list" id="cart">${c.itens.map((it, i) => cartLine(it, i)).join('')}</div>` : `<div class="empty">A cesta está vazia. Busque um produto acima e toque nele: abre a tela de quantidade. Dá para lançar vários itens de uma vez.</div>`}
@@ -546,11 +563,19 @@ function renderLancar(m) {
   <div class="footbar"><button class="btn lg w ${c.dir === 'S' ? 'p' : c.dir === 'E' ? 'g' : ''}" id="confirm" ${okConfirm ? '' : 'disabled'}>Confirmar ${DIRN[c.dir]} · ${n} ${n === 1 ? 'item' : 'itens'}</button></div>`;
   bindLancar(m);
 }
+// um termo casa com o produto: nome, variação, família, linha, viscosidade, chave, código B2B ou código de barras
+function casa(s, t) {
+  const hay = norm([s.n, s.v, FAMI[s.f].n, LINHA[s.l], s.w, s.k.replace(/[-_]/g, ' ')].join(' '));
+  if (hay.includes(t)) return true;
+  if (s.b && (s.b === t || norm('2wl' + s.b).includes(t) || String(s.b).replace(/^0+/, '') === t.replace(/^0+/, ''))) return true;
+  if (/^\d{5,}$/.test(t) && ((s.e && s.e.includes(t)) || (s.e2 && s.e2.includes(t)))) return true;
+  return false;
+}
 function resultados() {
   const q = norm(S.q); const lim = 40; const out = []; const kitsOut = [];
   if (!q && !S.fam) return { html: '' };
   const vis = skusVisiveis(); const toks = q.split(' ').filter(Boolean);
-  const match = s => { if (S.fam && s.l !== S.fam && !(S.fam === 'kits')) return false; if (!toks.length) return true; const hay = norm([s.n, s.v, FAMI[s.f].n, s.w, s.k.replace(/[-_]/g, ' ')].join(' ')); return toks.every(t => hay.includes(t) || (/^\d{4}$/.test(t) && s.b === t) || (/^\d{6,}$/.test(t) && s.e && s.e.includes(t))); };
+  const match = s => { if (S.fam && s.l !== S.fam && !(S.fam === 'kits')) return false; if (!toks.length) return true; return toks.every(t => casa(s, t)); };
   for (const s of vis) { if (S.fam === 'kits') break; if (match(s)) { out.push(s); if (out.length >= lim) break; } }
   if (!S.fam || S.fam === 'kits') { for (const k of CAT.kits) { const hay = norm(k.n + ' ' + k.k + ' kit'); if (!toks.length || toks.every(t => hay.includes(t))) kitsOut.push(k); } }
   if (!out.length && !kitsOut.length) return { html: `<div class="empty">Nada encontrado para “${esc(S.q)}”. Tente pelo nome curto (ex.: “roof 40”, “fork 10w”, “maxx spray”).</div>` };
@@ -723,7 +748,9 @@ function renderEstoque(m) {
   const vis = skusVisiveis(); const q = norm(S.estQ); const toks = q.split(' ').filter(Boolean);
   let tot = 0, totCx = 0, low = 0, zero = 0, semc = 0;
   for (const s of vis) { const un = S.saldos[s.k], cx = S.saldosCx[s.k]; if (un == null && cx == null) { semc++; continue; } tot += un || 0; totCx += cx || 0; const a = alerta(s.k, un, cx); if (a === 'zero') zero++; else if (a === 'min') low++; }
-  const rows = vis.filter(s => (!S.estLinha || s.l === S.estLinha) && (!toks.length || toks.every(t => norm([s.n, s.v, FAMI[s.f].n, s.b, s.e, s.w].join(' ')).includes(t))));
+  const ordLinha = k => { const i = CAT.linhas.findIndex(l => l.k === k); return i < 0 ? 99 : i; };
+  const rows = vis.filter(s => (!S.estLinha || s.l === S.estLinha) && (!toks.length || toks.every(t => casa(s, t))))
+    .sort((a, b) => ordLinha(a.l) - ordLinha(b.l) || String(a.f).localeCompare(String(b.f)) || (a.o || 0) - (b.o || 0));
   let list = ''; let lastL = '', lastF = '';
   for (const s of rows) { const g = s.l === 'suspensao' ? 'Fork Oil ' + s.w : FAMI[s.f].n; if (s.l !== lastL || g !== lastF) { list += `<div class="grp">${esc(LINHA[s.l])} · ${esc(g)}</div>`; lastL = s.l; lastF = g; } const un = S.saldos[s.k], cx = S.saldosCx[s.k]; const mn = minDe(s.k); const a = alerta(s.k, un, cx); const cls = un == null && cx == null ? 'q' : a === 'zero' ? 'z' : a === 'min' ? 'lo' : ''; const tt = totalUn(s.k, un, cx); list += `<button class="srow" data-sku="${esc(s.k)}">${thumb(s.k)}<div class="grow"><div class="nm">${esc(s.l === 'camisetas' ? s.v : s.n)}${ativo(s.k) ? '' : '<span class="badge off">oculto</span>'}${s.acc ? `<span class="badge">${esc(ACC_NOME[s.acc])} no Full</span>` : ''}</div><div class="vr">${cxPadrao(s.k) ? `caixa cheia = ${fmt(cxPadrao(s.k))} un` : (cx ? 'caixas contadas à parte' : '')}${mn != null ? `${cxPadrao(s.k) || cx ? ' · ' : ''}mín ${fmt(mn)}` : ''}${s.b ? ` · ${esc(s.b)}` : ''}</div></div><div class="sd num ${cls}">${un == null ? '?' : fmt(un)}<small>${cx ? `+ ${fmt(cx)} cx cheia${cx === 1 ? '' : 's'}${tt != null && cx ? ` = ${fmt(tt)} un` : ''}` : 'un'}</small></div></button>`; }
   const km = kitsMontaveis();
@@ -735,7 +762,7 @@ function renderEstoque(m) {
   <div class="search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="eq" type="search" placeholder="Filtrar produto…" value="${esc(S.estQ)}" autocomplete="off" aria-label="Filtrar estoque"></div>
   <div class="chips">${['', ...CAT.linhas.map(l => l.k)].map(k => `<button class="chip sm ${S.estLinha === k ? 'on' : ''}" data-el="${k}">${k ? esc(LINHA[k]) : 'Tudo'}</button>`).join('')}</div>
   <div class="list">${list || '<div class="empty">Nenhum produto com esse filtro.</div>'}</div>
-  ${km.length && (!S.estLinha || S.estLinha === 'kits') ? `<h3>Kits montáveis com o saldo atual (unidades soltas)</h3><div class="list">${km.map(x => `<button class="srow" data-kit="${esc(x.kk)}">${thumb(x.kk)}<div class="grow"><div class="nm">${esc(KIT[x.kk].n)}</div><div class="vr">${kitComp(x.kk).itens.map(c => `${c.q}× ${esc(nomeSku(c.k))}`).join(' · ')}</div></div><div class="sd num ${x.n == null ? 'q' : x.n === 0 ? 'z' : ''}">${fmt(x.n)}<small>kits</small></div></button>`).join('')}</div>` : ''}
+  ${km.length && (!S.estLinha || S.estLinha === 'kits') ? `<h3>Kits montáveis com o saldo atual</h3><div class="list">${km.map(x => `<button class="srow" data-kit="${esc(x.kk)}">${thumb(x.kk)}<div class="grow"><div class="nm">${esc(KIT[x.kk].n)}</div><div class="vr">${kitComp(x.kk).itens.map(c => `${c.q}× ${esc(nomeSku(c.k))}`).join(' · ')}</div></div><div class="sd num ${x.n == null ? 'q' : x.n === 0 ? 'z' : ''}">${fmt(x.n)}<small>${x.incerto ? 'kits (mín.)' : 'kits'}</small></div></button>`).join('')}</div>` : ''}
   <div class="row"><button class="sw ${S.mostrarOcultos ? 'on' : ''}" id="e-oc" role="switch" aria-checked="${S.mostrarOcultos}"><i></i><span class="sm">Mostrar também os itens só de tabela B2B (galões de 20 L e versões tampa lacre)</span></button></div>`;
   m.querySelector('#e-msg').onclick = () => openMsg(null, 'estoque');
   const ec = m.querySelector('#e-cont'); if (ec) ec.onclick = () => { S.tab = 'contagem'; render(); };
@@ -750,7 +777,7 @@ function openSku(k) {
   const s = SKU[k]; if (!s) return; const c = skuCfg(k); const un = S.saldos[k], cx = S.saldosCx[k];
   sheet(`
     <div class="hd">${thumb(k, true)}<h2>${esc(s.n)}</h2><button class="xbtn" data-close aria-label="Fechar">✕</button></div>
-    <div class="kv"><span>Saldo atual</span><span class="v num">${esc(saldoStr(un, cx))}${totalUn(k, un, cx) != null && cx ? ` (= ${fmt(totalUn(k, un, cx))} un)` : ''}</span><span>Linha</span><span>${esc(LINHA[s.l])} · ${esc(FAMI[s.f].n)}</span>${s.t ? `<span>Tray</span><span>id ${s.t}${s.vid ? ' · var ' + s.vid : ''}${s.p != null ? ' · R$ ' + Number(s.p).toLocaleString('pt-BR', { minimumFractionDigits: 2 }) : ''}</span>` : ''}${s.b ? `<span>Código B2B</span><span>${esc(s.b)}</span>` : ''}${s.e ? `<span>EAN</span><span class="num">${esc(s.e)}</span>` : ''}${s.acc ? `<span>Full</span><span>sai com ${esc(ACC_NOME[s.acc].toLowerCase())}</span>` : ''}</div>
+    <div class="kv"><span>Saldo atual</span><span class="v num">${esc(saldoStr(un, cx))}${totalUn(k, un, cx) != null && cx ? ` (= ${fmt(totalUn(k, un, cx))} un)` : ''}</span><span>Linha</span><span>${esc(LINHA[s.l])} · ${esc(FAMI[s.f].n)}</span>${s.t ? `<span>Tray</span><span>id ${s.t}${s.vid ? ' · var ' + s.vid : ''}${s.p != null ? ' · R$ ' + Number(s.p).toLocaleString('pt-BR', { minimumFractionDigits: 2 }) : ''}</span>` : ''}${s.b ? `<span>Código B2B</span><span>${esc(s.b)}</span>` : ''}${s.e ? `<span>Código de barras</span><span class="num">${esc(s.e)}${s.e2 ? ' <span class="xs mu">ou ' + esc(s.e2) + ' (dois cadastrados — confira o rótulo)</span>' : ''}</span>` : ''}${s.acc ? `<span>Full</span><span>sai com ${esc(ACC_NOME[s.acc].toLowerCase())}</span>` : ''}</div>
     <label class="fl" for="f-cx">Unidades numa caixa cheia — opcional</label>
     <input class="textin num" id="f-cx" type="number" inputmode="numeric" min="0" placeholder="não sei ainda" value="${cxPadrao(k) || ''}">
     <div class="hint xs">Só serve para converter caixas cheias em unidades nos totais. <b>Sem esse número o app funciona igual</b>: conta as caixas cheias à parte ("12 un + 3 cx"). Quando você levantar quantas cabem, dá para preencher tudo de uma vez em Ajustes › Unidades por caixa.</div>
@@ -819,7 +846,7 @@ function renderHistorico(m) {
   const rows = q ? all.filter(x => (x.itens || []).some(it => it && it.k === q)) : all;
   m.innerHTML = `${bannerModo()}<div class="row"><h2 class="grow">Histórico</h2><span class="sm mu num">${fmt(all.length)} lançamentos</span></div>
   ${q ? `<div class="banner g">Mostrando só lançamentos de <b>${esc(nomeSku(q))}</b>. <button id="h-all">ver todos</button></div>` : ''}
-  <div class="list">${rows.slice(0, 200).map(x => { const its = (x.itens || []).filter(Boolean); const tot = its.reduce((a, it) => a + (it.d || 0), 0); const totCx = its.reduce((a, it) => a + (it.dc || 0), 0); const n = its.length; return `<button class="hrow ${x.estornadoPor ? 'est' : ''}" data-h="${esc(x.id)}"><div class="l1"><span class="seq">#${esc(pad(x.seq))}</span><span class="typ ${esc(String(x.dir || '').replace(/[^A-Z]/gi, ''))}">${esc(DIRN[x.dir] || x.dir)}</span><span class="sm">${esc(x.dir === 'INV' ? (LINHA[x.linha] || '') : [x.motivo, x.canal].filter(Boolean).join(' · '))}</span><span class="tot num">${x.dir === 'INV' ? n + (n === 1 ? ' SKU' : ' SKUs') : sign(tot) + (totCx ? ` · ${sign(totCx)} cx` : '')}</span></div><div class="l2">${dt(x.ts, true)} · ${esc(x.autor || '')} · ${n} ${n === 1 ? 'item' : 'itens'}${x.obs ? ' · ' + esc(x.obs) : ''}${x.estornadoPor ? ' · estornado' : ''}${x.arquivado ? ' · arquivado' : ''}</div></button>`; }).join('') || '<div class="empty">Nenhum lançamento ainda.</div>'}</div>
+  <div class="list">${rows.slice(0, 200).map(x => { const its = (x.itens || []).filter(Boolean); const prod = its.filter(it => !it.acc); const tot = prod.reduce((a, it) => a + (it.d || 0), 0); const totCx = prod.reduce((a, it) => a + (it.dc || 0), 0); const n = prod.length; return `<button class="hrow ${x.estornadoPor ? 'est' : ''}" data-h="${esc(x.id)}"><div class="l1"><span class="seq">#${esc(pad(x.seq))}</span><span class="typ ${esc(String(x.dir || '').replace(/[^A-Z]/gi, ''))}">${esc(DIRN[x.dir] || x.dir)}</span><span class="sm">${esc(x.dir === 'INV' ? (LINHA[x.linha] || '') : [x.motivo, x.canal].filter(Boolean).join(' · '))}</span><span class="tot num">${x.dir === 'INV' ? n + (n === 1 ? ' SKU' : ' SKUs') : sign(tot) + (totCx ? ` · ${sign(totCx)} cx` : '')}</span></div><div class="l2">${dt(x.ts, true)} · ${esc(x.autor || '')} · ${n} ${n === 1 ? 'item' : 'itens'}${x.obs ? ' · ' + esc(x.obs) : ''}${x.estornadoPor ? ' · estornado' : ''}${x.arquivado ? ' · arquivado' : ''}</div></button>`; }).join('') || '<div class="empty">Nenhum lançamento ainda.</div>'}</div>
   ${rows.length > 200 ? `<div class="hint">Mostrando os 200 mais recentes de ${rows.length}.</div>` : ''}`;
   const ha = m.querySelector('#h-all'); if (ha) ha.onclick = () => { S.histQ = ''; render(); };
   m.querySelectorAll('[data-h]').forEach(b => b.onclick = () => openMov(b.dataset.h));
@@ -853,7 +880,7 @@ async function estornar(x, motivoExtra) {
 /* ---------- CONTAGEM ---------- */
 function renderContagem(m) {
   const linhas = CAT.linhas.filter(l => l.k !== 'kits'); if (!S.contLinha) S.contLinha = linhas[0].k;
-  const rows = skusVisiveis().filter(s => s.l === S.contLinha);
+  const rows = skusVisiveis().filter(s => s.l === S.contLinha).sort((a, b) => String(a.f).localeCompare(String(b.f)) || (a.o || 0) - (b.o || 0));
   const r = S.contRasc; const contado = s => r[s.k] != null || r['cx:' + s.k] != null; let feitos = rows.filter(contado).length;
   m.innerHTML = `${bannerModo()}<div class="row"><h2 class="grow">Contagem</h2><span class="sm mu num" id="c-prog">${feitos}/${rows.length} contados</span></div>
   <div class="hint">Conte uma linha por vez: <b>caixas cheias</b> (caixa padrão fechada) e <b>unidades soltas</b>. Campo vazio = não contado, aquele saldo não muda. Ao salvar, o app registra as diferenças e gera a mensagem. O rascunho fica salvo e outra pessoa pode contar outra prateleira ao mesmo tempo.</div>
