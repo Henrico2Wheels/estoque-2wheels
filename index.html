@@ -442,7 +442,7 @@ function msgMov(m, comSaldo) {
   const outros = solto.filter(it => !CAT.linhas.some(l => l.k === linhaDe(it.k))); if (outros.length) { lines.push(B('Outros')); for (const it of outros) lines.push(fmtIt(it)); }
   for (const [kk, g] of Object.entries(kitsIn)) { lines.push(`${B(fmt(g.q) + '× ' + (KIT[kk] ? KIT[kk].n : kk))}`); for (const it of g.itens) lines.push('  ↳ ' + fmtIt(it)); }
   const tot = itens.reduce((a, it) => a + (it.d || 0), 0); const totCx = itens.reduce((a, it) => a + (it.dc || 0), 0); const nsk = new Set(itens.filter(it => !it.acc).map(it => it.k)).size;
-  lines.push('', `Total: ${nsk} SKU${nsk === 1 ? '' : 's'} · ${sign(tot)} un${totCx ? ` · ${sign(totCx)} cx cheia${Math.abs(totCx) === 1 ? '' : 's'}` : ''}`);
+  lines.push('', `Total: ${nsk} SKU${nsk === 1 ? '' : 's'}${tot || !totCx ? ` · ${sign(tot)} un` : ''}${totCx ? ` · ${sign(totCx)} cx cheia${Math.abs(totCx) === 1 ? '' : 's'}` : ''}`);
   if (comSaldo) {
     const z = new Set(), mn = new Set();
     for (const it of itens) { const s = saldoApos(m, it.k); const a = alerta(it.k, s.un, s.cx); if (a === 'zero') z.add(it.k); else if (a === 'min') mn.add(it.k); }
