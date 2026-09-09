@@ -118,7 +118,7 @@ h3{font:600 13px/1 var(--fd);letter-spacing:.14em;text-transform:uppercase;color
 .qty{display:flex;flex-direction:column;gap:10px}
 .qrow{display:grid;grid-template-columns:1fr;gap:6px;background:var(--sf2);border:1px solid var(--bd);border-radius:14px;padding:10px}
 .qrow .lab{font:600 12px/1 var(--fd);letter-spacing:.12em;text-transform:uppercase;color:var(--mu);display:flex;justify-content:space-between;align-items:center;gap:8px}
-.qrow .lab span:last-child{font-weight:500;letter-spacing:0;text-transform:none;color:var(--dim)}
+.qrow .lab span + span{font-weight:500;letter-spacing:0;text-transform:none;color:var(--mu);text-align:right}
 .stp{display:flex;align-items:center;background:var(--sf);border:1px solid var(--bd);border-radius:12px;overflow:hidden}
 .stp button{width:56px;min-height:56px;font:700 28px/1 var(--fd);color:var(--tx);display:grid;place-items:center;flex:0 0 auto}
 .stp button:hover{background:var(--sf3)}
@@ -260,7 +260,8 @@ const norm = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLow
 const num = v => { const n = Math.floor(Number(v)); return Number.isFinite(n) ? n : 0; };
 function skuCfg(k) { return (SAFE_KEY(k) && S.cfgSkus[k]) || {}; }
 function cxPadrao(k) { const c = skuCfg(k); return c.cxUn > 0 ? c.cxUn : null; } // unidades numa caixa cheia (definido pela pessoa)
-function ultQ(k) { const c = skuCfg(k); return c.ultCxQ > 0 ? c.ultCxQ : cxPadrao(k); }
+// última quantidade que ALGUÉM digitou para este produto — nunca uma sugestão do app
+function ultQ(k) { const c = skuCfg(k); return c.ultCxQ > 0 ? c.ultCxQ : null; }
 function minDe(k) { const c = skuCfg(k); return c.min != null ? c.min : null; }
 function ativo(k) { const c = skuCfg(k); if (c.ativo != null) return !!c.ativo; return !!(SKU[k] && SKU[k].a); }
 function nomeSku(k) { const s = SKU[k]; return s ? s.n : String(k); }
@@ -276,7 +277,7 @@ function saldoStr(un, cx, opts) { // "15 un + 3 cx" | "15" | "?"
   const semUn = opts && opts.semUn;
   if (un == null && cx == null) return '?';
   const u = un == null ? '?' : fmt(un); const c = cx != null && cx !== 0 ? `${fmt(cx)} cx` : '';
-  if (!c) return u; return `${u}${semUn ? '' : ' un'} + ${c}`;
+  if (!c) return u; return `${u}${semUn ? '' : ' un'} ${cx < 0 ? 'e' : '+'} ${c}`;
 }
 function totalUn(k, un, cx) { if (un == null && cx == null) return null; const p = cxPadrao(k); if (cx && !p) return null; return (un || 0) + (cx || 0) * (p || 0); }
 function alerta(k, un, cx) { // '' | 'zero' | 'min'
@@ -321,7 +322,10 @@ function saldoApos(m, k) { // {un, cx} right after movement m (replays ledger up
   for (const x of movs) aplicar(saldos, saldosCx, { ...x, itens: (x.itens || []).filter(i => i && i.k === k) });
   return { un: saldos[k], cx: saldosCx[k] };
 }
-function todosMovs() { const out = Object.values(S.movs).map(m => ({ ...m })); for (const a of Object.values(S.arqs)) for (const m of (a && a.movs) || []) out.push({ ...m, arquivado: true }); return out.sort((a, b) => b.ts - a.ts || (b.seq || 0) - (a.seq || 0)); }
+function todosMovs() { const vistos = new Set(); const out = [];
+  for (const a of Object.values(S.arqs)) for (const m of (a && a.movs) || []) if (m && m.id && !vistos.has(m.id)) { vistos.add(m.id); out.push({ ...m, arquivado: true }); }
+  for (const m of Object.values(S.movs)) if (m && !vistos.has(m.id)) { vistos.add(m.id); out.push({ ...m }); }
+  return out.sort((a, b) => b.ts - a.ts || (b.seq || 0) - (a.seq || 0)); }
 /* ===================== STORAGE ===================== */
 const LOCAL = { get() { const d = ls('local', null); return (d && typeof d === 'object') ? { movs: d.movs || {}, cfgSkus: d.cfgSkus || {}, cfgKits: d.cfgKits || {}, cfgGeral: d.cfgGeral || {}, arqs: d.arqs || {} } : { movs: {}, cfgSkus: {}, cfgKits: {}, cfgGeral: {}, arqs: {} }; }, set(d) { lsSet('local', d); } };
 async function connect() {
@@ -345,7 +349,11 @@ function subscribeDb() {
   S.unsub.push(db.doc('cnt/atual').onSnapshot(snap => { const d = (snap.exists && snap.data()) || {}; const it = {}; for (const [k, v] of Object.entries(d.itens || {})) if (v != null && SAFE_KEY(k)) it[k] = v; S.contRasc = it; if (S.tab === 'contagem' && !(document.activeElement && document.activeElement.closest && document.activeElement.closest('.crow'))) render(); }, onErr));
 }
 async function withRetry(fn) { try { return await fn(); } catch (e) { if (e && e.code === 'unavailable') { await new Promise(r => setTimeout(r, 400 + Math.random() * 600)); return await fn(); } throw e; } }
-function erroTxt(e) { if (!e) return 'erro'; if (e.code === 'quota_exceeded') return 'o banco atingiu o limite de registros — use "Fechar período" em Ajustes'; if (e.code === 'resource_exhausted') return 'muitas operações seguidas — espere um instante'; if (e.code === 'revoked' || e.code === 'not_granted') return 'acesso ao banco perdido — recarregue a página'; return e.message || String(e); }
+function erroTxt(e) {
+  if (!e) return 'erro desconhecido';
+  const m = { quota_exceeded: 'o banco atingiu o limite de registros — use "Fechar período" em Ajustes', resource_exhausted: 'muitas operações seguidas — espere alguns segundos e tente de novo', revoked: 'o acesso ao banco foi revogado — recarregue a página', not_granted: 'este aparelho não recebeu acesso ao banco — abra o app pelo claude.ai', capability_disabled: 'o banco não está disponível nesta versão da página — recarregue', capability_removed: 'o banco não está disponível nesta versão da página — recarregue', invalid_argument: 'o banco recusou o dado enviado (registro grande demais ou apagado por outro aparelho)', transform_error: 'o banco recusou o dado enviado', unavailable: 'o banco não respondeu — tente de novo em alguns segundos' };
+  return m[e.code] || e.message || String(e);
+}
 async function putMov(mov) {
   if (S.mode === 'db') { await withRetry(() => S.db.doc('mov/' + mov.id).set(mov)); }
   else { S.movs[mov.id] = mov; S.pend.push(mov.id); lsSet('pend', S.pend); saveLocal(); recompute(); }
@@ -408,7 +416,7 @@ function cabecalho(m) {
   else t = `📦 ${B('2WHEELS')}`;
   return `${t}\n#${pad(m.seq)} · ${dt(m.ts)}${who}${m.obs ? `\nObs: ${m.obs}` : ''}`;
 }
-function difTxt(it) { const p = []; if (it.esperado != null && it.novo != null && it.novo !== it.esperado) p.push(sign(it.novo - it.esperado) + (it.novoCx != null ? ' un' : '')); if (it.esperadoCx != null && it.novoCx != null && it.novoCx !== it.esperadoCx) p.push(sign(it.novoCx - it.esperadoCx) + ' cx'); return p.length ? ` (${p.join(', ')})` : ''; }
+function difTxt(it) { const p = []; const temCx = it.esperadoCx != null && it.novoCx != null && it.novoCx !== it.esperadoCx; if (it.esperado != null && it.novo != null && it.novo !== it.esperado) p.push(sign(it.novo - it.esperado) + (temCx ? ' un' : '')); if (temCx) p.push(sign(it.novoCx - it.esperadoCx) + ' cx cheia' + (Math.abs(it.novoCx - it.esperadoCx) === 1 ? '' : 's')); return p.length ? ` (${p.join(' e ')})` : ''; }
 function msgMov(m, comSaldo) {
   const lines = [cabecalho(m), '']; const itens = (m.itens || []).filter(it => it && it.k);
   if (m.dir === 'INV') {
@@ -418,6 +426,7 @@ function msgMov(m, comSaldo) {
     if (iguais) lines.push(`${iguais} ${iguais === 1 ? 'item conferido' : 'itens conferidos'} sem diferença`);
     const naoCont = (skusVisiveis().filter(s => !m.linha || s.l === m.linha).length) - itens.length;
     lines.push('', `Total: ${itens.length} ${itens.length === 1 ? 'SKU contado' : 'SKUs contados'}${naoCont > 0 ? ` · ${naoCont} não contado${naoCont === 1 ? '' : 's'} (saldo mantido)` : ''}`);
+    if (lines.some(l => /\bcx\b/.test(l))) lines.push('_cx = caixas cheias (caixa padrão fechada)_');
     return lines.join('\n');
   }
   const kitsIn = {}; const solto = []; const accBy = {};
@@ -428,11 +437,11 @@ function msgMov(m, comSaldo) {
     if (m.dir === 'AJ') { const s = comSaldo ? saldoApos(m, it.k) : null; const antes = saldoStr(it.esperado, it.esperadoCx); const nu = it.novo != null ? it.novo : (it.mostraNovo != null ? it.mostraNovo : it.esperado); const nc = it.novoCx != null ? it.novoCx : (it.mostraNovoCx != null ? it.mostraNovoCx : it.esperadoCx); return `${nomeSku(it.k)}: ${antes} → ${B(saldoStr(nu, nc))} (${qtdTxt(it)})${s ? flagTxt(it.k, s.un, s.cx) : ''}`; }
     return `${qtdTxt(it)} ${nomeSku(it.k)}${cxTxt(it)}${comSaldo ? apos(it) : ''}`;
   };
-  const fmtAcc = it => `  + ${fmt(Math.abs(it.d || 0))} ${nomeSku(it.k).toLowerCase()}${comSaldo ? apos(it) : ''}`;
+  const fmtAcc = it => `  ↳ ${sign(it.d || 0)} ${nomeSku(it.k)} (vai junto)${comSaldo ? apos(it) : ''}`;
   for (const l of CAT.linhas) { const arr = byLinha[l.k]; if (!arr || !arr.length) continue; lines.push(B(l.n)); for (const it of arr) { lines.push(fmtIt(it)); for (const a of accBy[it.k] || []) lines.push(fmtAcc(a)); } }
   const outros = solto.filter(it => !CAT.linhas.some(l => l.k === linhaDe(it.k))); if (outros.length) { lines.push(B('Outros')); for (const it of outros) lines.push(fmtIt(it)); }
-  for (const [kk, g] of Object.entries(kitsIn)) { lines.push(`${B('Kit')} ×${fmt(g.q)} ${KIT[kk] ? KIT[kk].n : kk}`); for (const it of g.itens) lines.push('  ↳ ' + fmtIt(it)); }
-  const tot = itens.reduce((a, it) => a + (it.d || 0), 0); const totCx = itens.reduce((a, it) => a + (it.dc || 0), 0); const nsk = new Set(itens.map(it => it.k)).size;
+  for (const [kk, g] of Object.entries(kitsIn)) { lines.push(`${B(fmt(g.q) + '× ' + (KIT[kk] ? KIT[kk].n : kk))}`); for (const it of g.itens) lines.push('  ↳ ' + fmtIt(it)); }
+  const tot = itens.reduce((a, it) => a + (it.d || 0), 0); const totCx = itens.reduce((a, it) => a + (it.dc || 0), 0); const nsk = new Set(itens.filter(it => !it.acc).map(it => it.k)).size;
   lines.push('', `Total: ${nsk} SKU${nsk === 1 ? '' : 's'} · ${sign(tot)} un${totCx ? ` · ${sign(totCx)} cx cheia${Math.abs(totCx) === 1 ? '' : 's'}` : ''}`);
   if (comSaldo) {
     const z = new Set(), mn = new Set();
@@ -440,6 +449,7 @@ function msgMov(m, comSaldo) {
     const p = []; if (z.size) p.push(`${z.size} zerado${z.size === 1 ? '' : 's'} ❗`); if (mn.size) p.push(`${mn.size} abaixo do mínimo ⚠️`);
     if (p.length) lines.push(p.join(' · '));
   }
+  if (lines.some(l => /\bcx\b/.test(l))) lines.push('_cx = caixas cheias (caixa padrão fechada)_');
   return lines.join('\n');
 }
 function famLabel(s) { if (s.l === 'camisetas') return s.v.replace(/^Tam\. /, ''); if (s.l === 'acessorios') return s.n; if (s.w) return s.v.replace(/^[^·]+· /, ''); return s.v; }
@@ -454,11 +464,11 @@ function msgEstoque() {
     for (const s of inL) { const g = s.l === 'suspensao' ? `Fork Oil ${s.w}` : FAMI[s.f].n; if (!groups[g]) { groups[g] = []; order.push(g); } groups[g].push(s); }
     for (const g of order) {
       const parts = groups[g].map(s => { const un = S.saldos[s.k], cx = S.saldosCx[s.k]; n++; if (un == null && cx == null) semc++; else { tot += un || 0; totCx += cx || 0; const a = alerta(s.k, un, cx); if (a === 'zero') zero++; else if (a === 'min') low++; } return `${famLabel(s)} ${cellSaldo(s.k)}`; });
-      lines.push(`${g}: ${parts.join(' · ')}`);
+      lines.push(`${g === l.n ? '' : g + ': '}${parts.join(' · ')}`);
     }
   }
-  const km = kitsMontaveis().filter(x => x.n == null || x.n > 0); if (km.length) { lines.push(B('Kits montáveis com o saldo')); for (const x of km) lines.push(`${KIT[x.kk].n}: ${x.n == null ? '?' : fmt(x.n)}`); }
-  lines.push('', `Total: ${n} SKUs · ${fmt(tot)} un${totCx ? ` + ${fmt(totCx)} cx cheias` : ''}${low ? ` · ${low} abaixo do mínimo` : ''}${zero ? ` · ${zero} zerado${zero === 1 ? '' : 's'}` : ''}${semc ? ` · ${semc} sem contagem` : ''}`);
+  const km = kitsMontaveis().filter(x => x.n == null || x.n > 0); if (km.length) { lines.push(B('Kits montáveis com as unidades soltas')); for (const x of km) lines.push(`${KIT[x.kk].n}: ${x.n == null ? '?' : fmt(x.n)}`); }
+  lines.push('', `Total: ${n} SKUs · ${fmt(tot)} un${totCx ? ` ${totCx < 0 ? 'e' : '+'} ${fmt(totCx)} cx cheias` : ''}${low ? ` · ${low} abaixo do mínimo` : ''}${zero ? ` · ${zero} zerado${zero === 1 ? '' : 's'}` : ''}${semc ? ` · ${semc} sem contagem` : ''}`);
   if (totCx) lines.push('_cx = caixas cheias (caixa padrão fechada)_');
   return lines.join('\n');
 }
@@ -488,18 +498,23 @@ function renderStatus() {
 function render() { const m = $('#main'); if (!m) return; const y = window.scrollY; document.querySelectorAll('.tab').forEach(b => { const on = b.dataset.tab === S.tab; b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); }); ({ lancar: renderLancar, estoque: renderEstoque, historico: renderHistorico, contagem: renderContagem })[S.tab](m); window.scrollTo(0, y); }
 function bannerModo() {
   if (S.mode === 'local') return `<div class="banner am">Sem banco compartilhado: os lançamentos ficam <b>só neste aparelho</b>. Ao abrir o app pelo claude.ai com o banco disponível, eles sobem sozinhos.${S.pend.length ? ` <b>${S.pend.length} pendente(s)</b>.` : ''}</div>`;
-  if (S.mode === 'err') return `<div class="banner rd">O banco compartilhado recusou a conexão. Recarregue a página; se persistir, o acesso ao artifact pode ter mudado.</div>`;
+  if (S.mode === 'err') return `<div class="banner rd">A conexão com o banco compartilhado caiu. <button id="b-recon">tentar de novo</button> — enquanto isso, não lance nada para não gravar em cima de saldo desatualizado.</div>`;
   if (!S.autor) return `<div class="banner g">Diga quem está lançando: <button id="b-autor">definir meu nome</button>. Ele vai em todas as mensagens.</div>`;
   return '';
 }
-function bindAutor(m) { const ba = m.querySelector('#b-autor'); if (ba) ba.onclick = () => openAutor(); }
+function bindAutor(m) { const ba = m.querySelector('#b-autor'); if (ba) ba.onclick = () => openAutor(); const br = m.querySelector('#b-recon'); if (br) br.onclick = () => reconectar(); }
+async function reconectar() {
+  for (const u of S.unsub) { try { u(); } catch (e) { } }
+  S.unsub = []; flushed = false; gotMov = false; gotArq = false; S.mode = 'boot'; renderStatus(); render();
+  try { if (S.db) { subscribeDb(); toast('Reconectando…'); } else await connect(); } catch (e) { S.mode = 'err'; renderStatus(); render(); toast('Não reconectou: ' + erroTxt(e)); }
+}
 /* ---------- LANÇAR ---------- */
 function isAJ() { return S.cart.dir === 'AJ'; }
 function isFull() { return S.cart.dir === 'S' && S.cart.motivo === 'FULL'; }
 function accDe(k) { const s = SKU[k]; return s && s.acc ? s.acc : null; }
 function saveCart() { lsSet('cart', S.cart); }
 function unIt(it) { return num(it.un) + num(it.cx) * num(it.cxQ); } // unidades contadas (soltas + caixas com quantidade)
-function deltas(it) { // {d, dc} signed, for a cart line
+function deltas(it) { // {d, dc} com sinal, para uma linha da cesta
   if (isAJ()) { const su = saldoDe(it.k), sc = saldoCxDe(it.k); const d = it.novo == null || it.novo === '' ? 0 : num(it.novo) - (su == null ? 0 : su); const dc = it.novoCx == null || it.novoCx === '' ? 0 : num(it.novoCx) - (sc == null ? 0 : sc); return { d, dc }; }
   const sg = S.cart.dir === 'S' ? -1 : 1; return { d: sg * unIt(it), dc: sg * num(it.cxc) };
 }
@@ -557,7 +572,7 @@ function cartLine(it, i) {
   const neg = (nu != null && nu < 0) || (nc != null && nc < 0);
   const acc = !it.kit && isFull() && S.cart.accFull !== false ? accDe(it.k) : null;
   return `<div class="cl" data-i="${i}">
-    <button class="body" data-edit="${i}" ${it.kit ? 'disabled' : ''} aria-label="Editar quantidade">${thumb(it.k)}<div class="grow"><div class="nm">${esc(s ? s.n : it.k)}${it.kit ? `<span class="badge kit">${esc(KIT[it.kit] ? KIT[it.kit].n : it.kit)} ×${fmt(it.kitQ || 1)}</span>` : ''}</div><div class="qs">${esc(resumoIt(it))}${acc ? ` <span class="mu sm">+ ${fmt(Math.abs(d))} ${esc(ACC_NOME[acc].toLowerCase())}</span>` : ''}</div><div class="sub num">saldo ${esc(saldoStr(su, sc))} → <span class="${neg ? 'neg' : ''}">${esc(saldoStr(nu, nc))}</span>${neg ? ' (ficaria negativo)' : ''}${it.kit ? '' : ' · toque para editar'}</div></div></button>
+    <button class="body" data-edit="${i}" data-kit="${esc(it.kit || '')}" aria-label="Editar quantidade">${thumb(it.k)}<div class="grow"><div class="nm">${esc(s ? s.n : it.k)}${it.kit ? `<span class="badge kit">${esc(KIT[it.kit] ? KIT[it.kit].n : it.kit)} ×${fmt(it.kitQ || 1)}</span>` : ''}</div><div class="qs">${esc(resumoIt(it))}${acc ? ` <span class="mu sm">+ ${fmt(Math.abs(d))} ${esc(ACC_NOME[acc].toLowerCase())}</span>` : ''}</div><div class="sub num">saldo ${esc(saldoStr(su, sc))} → <span class="${neg ? 'neg' : ''}">${esc(saldoStr(nu, nc))}</span>${neg ? ' (ficaria negativo)' : ''} · toque para ${it.kit ? 'mudar a quantidade de kits' : 'editar'}</div></div></button>
     <button class="rm" data-rm="${i}" aria-label="Remover"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
   </div>`;
 }
@@ -566,32 +581,50 @@ function openQty(k, idx) {
   const s = SKU[k]; if (!s) return;
   const editing = idx != null; const base = editing ? { ...S.cart.itens[idx] } : { k, un: 0, cx: 0, cxQ: ultQ(k) || '', cxc: 0, novo: '', novoCx: '' };
   const it = base; const su = saldoDe(k), sc = saldoCxDe(k); const dirCls = S.cart.dir === 'S' ? 'p' : S.cart.dir === 'E' ? 'g' : '';
-  const draw = () => {
-    const { d, dc } = (() => { const save = S.cart.itens; S.cart.itens = [it]; const r = deltas(it); S.cart.itens = save; return r; })();
+  const calc = () => {
+    const { d, dc } = deltas(it);
     const nu = su == null ? (isAJ() && it.novo !== '' && it.novo != null ? num(it.novo) : (d || null)) : su + d;
     const nc = sc == null ? (isAJ() && it.novoCx !== '' && it.novoCx != null ? num(it.novoCx) : (dc || null)) : sc + dc;
     const neg = (nu != null && nu < 0) || (nc != null && nc < 0);
     const precisaQ = num(it.cx) > 0 && !(num(it.cxQ) > 0);
     const podeAdd = isAJ() ? ((it.novo !== '' && it.novo != null) || (it.novoCx !== '' && it.novoCx != null)) : ((unIt(it) > 0 || num(it.cxc) > 0) && !precisaQ);
-    const stp = (f, lab, extra) => `<div class="qrow"><div class="lab"><span>${lab}</span>${extra || ''}</div><div class="stp"><button data-st="${f}" data-d="-1" aria-label="menos">−</button><input type="number" inputmode="numeric" min="0" data-f="${f}" value="${num(it[f]) || ''}" placeholder="0" aria-label="${lab}"><button data-st="${f}" data-d="1" aria-label="mais">+</button></div>${f === 'cx' ? `<div class="per">× <input type="number" inputmode="numeric" min="1" data-f="cxQ" value="${it.cxQ || ''}" placeholder="quantas?" aria-label="Unidades por caixa"> un por caixa${num(it.cx) && num(it.cxQ) ? ` <b class="num">= ${fmt(num(it.cx) * num(it.cxQ))} un</b>` : ''}${precisaQ ? ' <span style="color:var(--am)">informe quantas unidades vêm em cada caixa</span>' : ''}</div>` : ''}</div>`;
+    return { d, dc, nu, nc, neg, precisaQ, podeAdd };
+  };
+  const draw = () => {
+    const { nu, nc, neg, precisaQ, podeAdd } = calc();
+    const stp = (f, lab, extra) => `<div class="qrow"><div class="lab"><span>${lab}</span>${extra || ''}</div><div class="stp"><button data-st="${f}" data-d="-1" aria-label="menos">−</button><input type="number" inputmode="numeric" min="0" data-f="${f}" value="${num(it[f]) || ''}" placeholder="0" aria-label="${lab}"><button data-st="${f}" data-d="1" aria-label="mais">+</button></div>${f === 'cx' ? `<div class="per">× <input type="number" inputmode="numeric" min="1" data-f="cxQ" value="${it.cxQ || ''}" placeholder="quantas?" aria-label="Unidades por caixa"> un por caixa <b class="num" id="q-eq">${num(it.cx) && num(it.cxQ) ? `= ${fmt(num(it.cx) * num(it.cxQ))} un` : ''}</b><span id="q-falta" style="color:var(--am)" ${precisaQ ? '' : 'hidden'}>informe quantas unidades vêm em cada caixa</span></div>` : ''}</div>`;
     sheet(`<div class="hd">${thumb(k, true)}<div class="grow"><h2>${esc(s.n)}</h2><div class="sm mu">${esc(FAMI[s.f].n)} · ${esc(s.v)} · saldo <b class="num">${esc(saldoStr(su, sc))}</b>${cxPadrao(k) ? ` · caixa cheia = ${fmt(cxPadrao(k))} un` : ''}</div></div><button class="xbtn" data-close aria-label="Fechar">✕</button></div>
     <div class="qty">${isAJ() ? `
       <div class="qrow"><div class="lab"><span>Novo saldo em unidades</span><span>hoje: ${esc(su == null ? '?' : fmt(su))}</span></div><div class="stp"><button data-st="novo" data-d="-1" aria-label="menos">−</button><input type="number" inputmode="numeric" min="0" data-f="novo" value="${it.novo === '' || it.novo == null ? '' : num(it.novo)}" placeholder="não mexer" aria-label="Novo saldo em unidades"><button data-st="novo" data-d="1" aria-label="mais">+</button></div></div>
       <div class="qrow"><div class="lab"><span>Novo saldo em caixas cheias</span><span>hoje: ${esc(sc == null ? '?' : fmt(sc))}</span></div><div class="stp"><button data-st="novoCx" data-d="-1" aria-label="menos">−</button><input type="number" inputmode="numeric" min="0" data-f="novoCx" value="${it.novoCx === '' || it.novoCx == null ? '' : num(it.novoCx)}" placeholder="não mexer" aria-label="Novo saldo em caixas cheias"><button data-st="novoCx" data-d="1" aria-label="mais">+</button></div></div>` : `
       ${stp('un', 'Unidades soltas')}
-      ${stp('cx', 'Caixas com quantidade', '<span>você diz quantas unidades tem em cada caixa</span>')}
+      ${stp('cx', 'Caixas com quantidade', `<span>${ultQ(k) ? 'última vez: ' + fmt(ultQ(k)) + ' un por caixa' : 'você digita quantas unidades tem em cada caixa'}</span>`)}
       ${stp('cxc', 'Caixas cheias', '<span>caixa padrão fechada, sem contar por dentro</span>')}`}
       <div class="qres num">${isAJ() ? '' : `Lança: <b>${esc(resumoIt(it))}</b><br>`}Saldo ${esc(saldoStr(su, sc))} → <b class="${neg ? 'neg' : ''}">${esc(saldoStr(nu, nc))}</b>${neg ? ' <span class="neg">(ficaria negativo)</span>' : ''}</div>
     </div>
     <div class="acts two"><button class="btn lg ${dirCls}" id="q-ok" ${podeAdd ? '' : 'disabled'}>${editing ? 'Salvar' : 'Adicionar à cesta'}</button><button class="btn" id="q-cx">${cxPadrao(k) ? 'Caixa cheia = ' + fmt(cxPadrao(k)) + ' un' : 'Quantas cabem na caixa?'}</button></div>`);
     const sh = $('#sheet');
     sh.querySelectorAll('[data-st]').forEach(b => b.onclick = () => { const f = b.dataset.st; const cur = (it[f] === '' || it[f] == null) ? (f.startsWith('novo') ? (f === 'novo' ? (su || 0) : (sc || 0)) : 0) : num(it[f]); it[f] = Math.max(0, cur + (+b.dataset.d)); draw(); });
-    sh.querySelectorAll('input[data-f]').forEach(inp => { inp.onchange = () => { const f = inp.dataset.f; it[f] = inp.value === '' ? (f.startsWith('novo') ? '' : 0) : Math.max(0, num(inp.value)); draw(); }; inp.onfocus = () => inp.select(); inp.onkeydown = e => { if (e.key === 'Enter') { inp.blur(); const ok = sh.querySelector('#q-ok'); if (ok && !ok.disabled && !isAJ() && f !== 'cxQ') ok.click(); } }; });
+    sh.querySelectorAll('input[data-f]').forEach(inp => {
+      const ler = () => { const f = inp.dataset.f; it[f] = inp.value === '' ? (f.startsWith('novo') ? '' : 0) : Math.max(0, num(inp.value)); };
+      inp.oninput = () => { ler(); atualizar(); };
+      inp.onchange = () => { ler(); atualizar(); };
+      inp.onfocus = () => inp.select();
+      inp.onkeydown = e => { if (e.key !== 'Enter') return; e.preventDefault(); ler(); atualizar(); const ok = $('#q-ok'); if (ok && !ok.disabled) ok.click(); };
+    });
+    function atualizar() {
+      const s2 = $('#sheet'); if (!s2) return;
+      const r = calc(); const res = s2.querySelector('.qres');
+      if (res) res.innerHTML = `${isAJ() ? '' : `Lança: <b>${esc(resumoIt(it))}</b><br>`}Saldo ${esc(saldoStr(su, sc))} → <b class="${r.neg ? 'neg' : ''}">${esc(saldoStr(r.nu, r.nc))}</b>${r.neg ? ' <span class="neg">(ficaria negativo)</span>' : ''}`;
+      const ok = s2.querySelector('#q-ok'); if (ok) ok.disabled = !r.podeAdd;
+      const av = s2.querySelector('#q-falta'); if (av) av.hidden = !r.precisaQ;
+      const eq = s2.querySelector('#q-eq'); if (eq) eq.textContent = num(it.cx) && num(it.cxQ) ? `= ${fmt(num(it.cx) * num(it.cxQ))} un` : '';
+    }
     sh.querySelector('#q-ok').onclick = () => {
       const line = { k, un: num(it.un), cx: num(it.cx), cxQ: num(it.cxQ) || null, cxc: num(it.cxc), novo: it.novo === '' ? null : (it.novo == null ? null : num(it.novo)), novoCx: it.novoCx === '' ? null : (it.novoCx == null ? null : num(it.novoCx)) };
       if (editing) S.cart.itens[idx] = { ...S.cart.itens[idx], ...line }; else S.cart.itens.push(line);
       if (line.cx && line.cxQ && line.cxQ !== ultQ(k)) patchCfg('skus', { [k]: { ultCxQ: line.cxQ } }).catch(e => console.error(e));
-      saveCart(); closeSheet(); S.q = ''; render(); toast(`${s.n} na cesta`);
+      saveCart(); closeSheet(true); S.q = ''; S.fam = ''; render(); toast(`${s.n} na cesta`);
       const q = $('#q'); if (q && matchMedia('(min-width:721px)').matches) q.focus();
     };
     sh.querySelector('#q-cx').onclick = () => openCxDef(k, () => openQty(k, idx));
@@ -609,8 +642,9 @@ function openKitQty(kk) {
     <div class="acts two"><button class="btn lg ${S.cart.dir === 'S' ? 'p' : 'g'}" id="k-ok">${ex ? 'Salvar' : 'Adicionar à cesta'}</button><button class="btn" id="k-ed">Composição</button></div>`);
     const sh = $('#sheet');
     sh.querySelectorAll('[data-d]').forEach(b => b.onclick = () => { q = Math.max(1, q + (+b.dataset.d)); draw(); });
-    sh.querySelector('#kq').onchange = e => { q = Math.max(1, num(e.target.value)); draw(); };
-    sh.querySelector('#k-ok').onclick = () => { S.cart.itens = S.cart.itens.filter(it => it.kit !== kk); for (const c of comp.itens) S.cart.itens.push({ k: c.k, un: c.q * q, cx: 0, cxQ: null, cxc: 0, kit: kk, kitQ: q }); saveCart(); closeSheet(); S.q = ''; render(); toast(`${k.n} ×${q} na cesta`); };
+    const kqi = sh.querySelector('#kq'); kqi.oninput = () => { q = Math.max(1, num(kqi.value) || 1); }; kqi.onchange = () => { q = Math.max(1, num(kqi.value) || 1); draw(); }; kqi.onfocus = () => kqi.select();
+    kqi.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); q = Math.max(1, num(kqi.value) || 1); const ok = $('#k-ok'); if (ok) ok.click(); } };
+    sh.querySelector('#k-ok').onclick = () => { S.cart.itens = S.cart.itens.filter(it => it.kit !== kk); for (const c of comp.itens) S.cart.itens.push({ k: c.k, un: c.q * q, cx: 0, cxQ: null, cxc: 0, kit: kk, kitQ: q }); saveCart(); closeSheet(true); S.q = ''; S.fam = ''; render(); toast(`${k.n} ×${q} na cesta`); };
     sh.querySelector('#k-ed').onclick = () => openKitEdit(kk);
   };
   draw();
@@ -624,7 +658,7 @@ function bindLancar(m) {
   q.onkeydown = e => { if (e.key === 'Enter') { const first = m.querySelector('#res [data-add],#res [data-addkit]'); if (first) first.click(); } };
   bindQx(m); bindRes(m);
   m.querySelectorAll('[data-rm]').forEach(b => b.onclick = () => { const it = S.cart.itens[+b.dataset.rm]; if (it && it.kit) S.cart.itens = S.cart.itens.filter(x => x.kit !== it.kit); else S.cart.itens.splice(+b.dataset.rm, 1); saveCart(); render(); });
-  m.querySelectorAll('[data-edit]').forEach(b => b.onclick = () => { const it = S.cart.itens[+b.dataset.edit]; if (it && !it.kit) openQty(it.k, +b.dataset.edit); });
+  m.querySelectorAll('[data-edit]').forEach(b => b.onclick = () => { const it = S.cart.itens[+b.dataset.edit]; if (!it) return; if (it.kit) openKitQty(it.kit); else openQty(it.k, +b.dataset.edit); });
   const af = m.querySelector('#accfull'); if (af) af.onclick = () => { S.cart.accFull = S.cart.accFull === false; saveCart(); render(); };
   const obs = m.querySelector('#obs'); obs.oninput = () => { S.cart.obs = obs.value; saveCart(); };
   const cf = m.querySelector('#confirm'); if (cf) cf.onclick = confirmar;
@@ -632,8 +666,14 @@ function bindLancar(m) {
 }
 function bindQx(m) { const x = m.querySelector('#qx'); if (x) x.onclick = () => { S.q = ''; render(); const q = $('#q'); if (q) q.focus(); }; }
 function bindRes(m) { m.querySelectorAll('[data-add]').forEach(b => b.onclick = () => openQty(b.dataset.add)); m.querySelectorAll('[data-addkit]').forEach(b => b.onclick = () => openKitQty(b.dataset.addkit)); }
+function prontoParaGravar() {
+  if (S.mode === 'local') return true;
+  if (S.mode !== 'db' || !gotMov || !gotArq) { toast('Ainda carregando os lançamentos do banco — um instante.'); return false; }
+  return true;
+}
 async function confirmar() {
   const c = S.cart; if (!c.itens.length) return;
+  if (!prontoParaGravar()) return;
   if (!S.autor) { openAutor(() => confirmar()); return; }
   const neg = c.itens.filter(it => { const su = saldoDe(it.k), sc = saldoCxDe(it.k); const { d, dc } = deltas(it); return (su != null && su + d < 0) || (sc != null && sc + dc < 0); });
   if (neg.length && !(await ask('Saldo ficaria negativo', `${neg.length} item(ns) ficaria(m) com saldo negativo:\n${neg.map(it => '• ' + nomeSku(it.k)).join('\n')}\n\nLançar mesmo assim?`, 'Lançar assim mesmo'))) return;
@@ -737,7 +777,7 @@ function abrirCaixa(k) {
   sh.querySelector('#a-pad').onclick = () => { gravaPad = !gravaPad; const b = sh.querySelector('#a-pad'); b.classList.toggle('on', gravaPad); b.setAttribute('aria-checked', gravaPad); };
   sh.querySelector('#a-ok').onclick = async () => {
     const q = num(sh.querySelector('#a-q').value); if (q <= 0) { toast('Informe quantas unidades tinha na caixa.'); return; }
-    if (!S.autor) { openAutor(); return; }
+    if (!S.autor) { const q0 = q; openAutor(() => { abrirCaixa(k); setTimeout(() => { const i = $('#a-q'); if (i) i.value = q0; }, 80); }); return; }
     const ts = now(); const su = saldoDe(k), sc = saldoCxDe(k);
     const mov = { id: uid(), seq: S.seqMax + 1, ts, dia: new Date(ts).toISOString().slice(0, 10), dir: 'AJ', motivo: 'Abrir caixa', canal: '', obs: `Abertura de 1 caixa cheia de ${s.n} (${q} un dentro)`, autor: S.autor, itens: [{ k, un: q, cx: 0, cxUn: null, cxc: 1, d: q, dc: -1, esperado: su == null ? null : su, esperadoCx: sc == null ? null : sc, mostraNovo: (su || 0) + q, mostraNovoCx: (sc || 0) - 1 }], criadoEm: new Date(ts).toISOString() };
     try { await putMov(mov); S.movs[mov.id] = mov; recompute(); if (gravaPad) await patchCfg('skus', { [k]: { cxUn: q } }); closeSheet(true); render(); openMsg(mov, 'movsaldo'); } catch (e) { toast('Não salvou: ' + erroTxt(e)); }
@@ -779,7 +819,7 @@ function renderHistorico(m) {
   const rows = q ? all.filter(x => (x.itens || []).some(it => it && it.k === q)) : all;
   m.innerHTML = `${bannerModo()}<div class="row"><h2 class="grow">Histórico</h2><span class="sm mu num">${fmt(all.length)} lançamentos</span></div>
   ${q ? `<div class="banner g">Mostrando só lançamentos de <b>${esc(nomeSku(q))}</b>. <button id="h-all">ver todos</button></div>` : ''}
-  <div class="list">${rows.slice(0, 200).map(x => { const its = (x.itens || []).filter(Boolean); const tot = its.reduce((a, it) => a + (it.d || 0), 0); const totCx = its.reduce((a, it) => a + (it.dc || 0), 0); const n = its.length; return `<button class="hrow ${x.estornadoPor ? 'est' : ''}" data-h="${esc(x.id)}"><div class="l1"><span class="seq">#${esc(pad(x.seq))}</span><span class="typ ${esc(String(x.dir || '').replace(/[^A-Z]/gi, ''))}">${esc(DIRN[x.dir] || x.dir)}</span><span class="sm">${esc(x.dir === 'INV' ? (LINHA[x.linha] || '') : [x.motivo, x.canal].filter(Boolean).join(' · '))}</span><span class="tot num">${x.dir === 'INV' ? n + ' SKUs' : sign(tot) + (totCx ? ` · ${sign(totCx)} cx` : '')}</span></div><div class="l2">${dt(x.ts, true)} · ${esc(x.autor || '')} · ${n} ${n === 1 ? 'item' : 'itens'}${x.obs ? ' · ' + esc(x.obs) : ''}${x.estornadoPor ? ' · estornado' : ''}${x.arquivado ? ' · arquivado' : ''}</div></button>`; }).join('') || '<div class="empty">Nenhum lançamento ainda.</div>'}</div>
+  <div class="list">${rows.slice(0, 200).map(x => { const its = (x.itens || []).filter(Boolean); const tot = its.reduce((a, it) => a + (it.d || 0), 0); const totCx = its.reduce((a, it) => a + (it.dc || 0), 0); const n = its.length; return `<button class="hrow ${x.estornadoPor ? 'est' : ''}" data-h="${esc(x.id)}"><div class="l1"><span class="seq">#${esc(pad(x.seq))}</span><span class="typ ${esc(String(x.dir || '').replace(/[^A-Z]/gi, ''))}">${esc(DIRN[x.dir] || x.dir)}</span><span class="sm">${esc(x.dir === 'INV' ? (LINHA[x.linha] || '') : [x.motivo, x.canal].filter(Boolean).join(' · '))}</span><span class="tot num">${x.dir === 'INV' ? n + (n === 1 ? ' SKU' : ' SKUs') : sign(tot) + (totCx ? ` · ${sign(totCx)} cx` : '')}</span></div><div class="l2">${dt(x.ts, true)} · ${esc(x.autor || '')} · ${n} ${n === 1 ? 'item' : 'itens'}${x.obs ? ' · ' + esc(x.obs) : ''}${x.estornadoPor ? ' · estornado' : ''}${x.arquivado ? ' · arquivado' : ''}</div></button>`; }).join('') || '<div class="empty">Nenhum lançamento ainda.</div>'}</div>
   ${rows.length > 200 ? `<div class="hint">Mostrando os 200 mais recentes de ${rows.length}.</div>` : ''}`;
   const ha = m.querySelector('#h-all'); if (ha) ha.onclick = () => { S.histQ = ''; render(); };
   m.querySelectorAll('[data-h]').forEach(b => b.onclick = () => openMov(b.dataset.h));
@@ -799,7 +839,7 @@ function openMov(id) {
   sh.querySelector('#h-ref').onclick = () => { closeSheet(); S.cart = { dir: x.dir === 'AJ' ? 'AJ' : x.dir, motivo: x.motivo, canal: x.canal, obs: x.obs || '', accFull: false, itens: (x.itens || []).filter(it => it && !it.acc).map(it => ({ k: it.k, un: it.un || 0, cx: it.cx || 0, cxQ: it.cxUn || null, cxc: it.cxc || 0, kit: it.kit, kitQ: it.kitQ, novo: x.dir === 'AJ' ? it.novo : null, novoCx: x.dir === 'AJ' ? it.novoCx : null })) }; saveCart(); S.tab = 'lancar'; render(); };
 }
 async function estornar(x, motivoExtra) {
-  if (!S.autor) { openAutor(); return; }
+  if (!S.autor) { openAutor(() => estornar(x, motivoExtra)); return; }
   const jaEst = x.estornadoPor || todosMovs().some(m => m.estornaDe === x.id);
   if (jaEst) { toast(`#${pad(x.seq)} já foi estornado.`); return; }
   const ts = now();
@@ -827,7 +867,8 @@ function renderContagem(m) {
   m.querySelector('#c-zero').onclick = async () => { if (!(await ask('Zerar não contados', 'Marcar como ZERO (0 unidades e 0 caixas) todos os itens desta linha que ainda não foram contados?', 'Zerar'))) return; const p = {}; for (const s of rows) if (!contado(s)) { p[s.k] = 0; p['cx:' + s.k] = 0; } await contSet(p); render(); };
   m.querySelector('#c-clear').onclick = async () => { if (!(await ask('Limpar contagem', 'Limpar os campos desta linha? O que já foi salvo em lançamentos não muda.', 'Limpar'))) return; const p = {}; for (const s of rows) { p[s.k] = null; p['cx:' + s.k] = null; } await contSet(p); render(); };
   m.querySelector('#c-save').onclick = async () => {
-    if (!S.autor) { openAutor(); return; }
+    if (!prontoParaGravar()) return;
+    if (!S.autor) { openAutor(() => { const b = $('#c-save'); if (b) b.click(); }); return; }
     const itens = rows.filter(contado).map(s => { const eu = S.saldos[s.k], ec = S.saldosCx[s.k]; const nu = r[s.k] != null ? num(r[s.k]) : null; const nc = r['cx:' + s.k] != null ? num(r['cx:' + s.k]) : null; return { k: s.k, esperado: eu == null ? null : eu, novo: nu, d: nu == null || eu == null ? null : nu - eu, esperadoCx: ec == null ? null : ec, novoCx: nc, dc: nc == null || ec == null ? null : nc - ec }; });
     if (!itens.length) return;
     const inicial = itens.every(it => it.esperado == null && it.esperadoCx == null);
@@ -896,6 +937,9 @@ function openCsv() {
 }
 async function fecharPeriodo(dataStr) {
   if (!dataStr) { toast('Escolha a data.'); return; }
+  if (S.mode !== 'db') { toast('Fechar período só com o banco compartilhado conectado.'); return; }
+  if (!gotMov || !gotArq) { toast('Ainda carregando o banco — tente daqui a pouco.'); return; }
+  if (S.pend.length) { toast('Há lançamentos feitos sem conexão ainda subindo. Espere sincronizar.'); return; }
   const ate = new Date(dataStr + 'T23:59:59').getTime(); if (!Number.isFinite(ate)) { toast('Data inválida.'); return; }
   const base = baseArq(); if (base && ate <= base.ate) { toast('Já existe um fechamento até ' + new Date(base.ate).toLocaleDateString('pt-BR') + '. Escolha uma data posterior.'); return; }
   const movs = ordenar(Object.values(S.movs).filter(m => m && !ARQIDS.has(m.id) && m.ts <= ate));
@@ -907,8 +951,11 @@ async function fecharPeriodo(dataStr) {
   const json = JSON.stringify(arq); const bytes = (typeof TextEncoder !== 'undefined') ? new TextEncoder().encode(json).length : json.length * 2;
   if (bytes > 220000) { toast('Período grande demais para um único arquivo (' + Math.round(bytes / 1024) + ' KB). Escolha uma data mais próxima.'); return; }
   try {
-    if (S.mode === 'db') { await withRetry(() => S.db.doc('arq/' + arq.id).set(arq)); for (const m of movs) await withRetry(() => S.db.doc('mov/' + m.id).delete()); }
-    S.arqs[arq.id] = arq; for (const m of movs) delete S.movs[m.id]; if (S.mode !== 'db') saveLocal(); recompute(); closeSheet(); render(); toast(`${movs.length} lançamentos arquivados`);
+    await withRetry(() => S.db.doc('arq/' + arq.id).set(arq));
+    const sobras = [];
+    for (const m of movs) { try { await withRetry(() => S.db.doc('mov/' + m.id).delete()); delete S.movs[m.id]; } catch (e) { console.error(e); sobras.push(m.seq); } }
+    S.arqs[arq.id] = arq; recompute(); closeSheet(true); render();
+    toast(sobras.length ? `Arquivado, mas ${sobras.length} lançamento(s) não saíram da lista (#${sobras.slice(0, 3).map(s => pad(s)).join(', #')}). Tente fechar de novo.` : `${movs.length} lançamentos arquivados`);
   } catch (e) { toast('Falhou: ' + erroTxt(e)); }
 }
 function openAutor(cb) {
