@@ -2,7 +2,7 @@
 
 Controle de estoque da 2Wheels: lançamento por unidade, por caixa com quantidade ou por caixa cheia, com mensagem pronta para o grupo de controle no WhatsApp.
 
-**Abrir:** https://henrico2wheels.github.io/estoque-2wheels/
+**Abrir:** https://estoque-2wheels.vercel.app
 
 Não precisa de conta nem de instalar nada. Funciona no celular e no computador.
 
@@ -29,4 +29,4 @@ Se ainda não se sabe quantas unidades cabem na caixa padrão, o campo fica em b
 
 Cada pessoa que abrir fica com um estoque só dela, guardado no próprio navegador — serve para conhecer e testar o app. Em Ajustes existe "Apagar tudo deste aparelho".
 
-O arquivo do site é o `index.html`. Para publicar uma versão nova, basta subir um `index.html` novo por cima.
+O arquivo do site é o `index.html`. Subir um `index.html` novo por cima republica sozinho na Vercel (https://estoque-2wheels.vercel.app) e no GitHub Pages (https://henrico2wheels.github.io/estoque-2wheels/).
