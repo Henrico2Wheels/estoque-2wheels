@@ -155,6 +155,7 @@ h3{font:600 13px/1 var(--fd);letter-spacing:.14em;text-transform:uppercase;color
 .modes button.on{background:var(--gbg);border-color:var(--g);color:var(--gt)}
 pre.msg{margin:0;white-space:pre-wrap;word-break:break-word;font:14px/1.45 var(--fb);background:var(--bg);border:1px solid var(--bd);border-radius:12px;padding:12px;max-height:38vh;overflow:auto}
 .acts{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
+.sheet > .acts:last-child{position:sticky;bottom:calc(-18px - env(safe-area-inset-bottom,0px));background:var(--sf);padding:8px 0 4px;margin-bottom:-4px;box-shadow:0 -10px 16px var(--sf)}
 .acts.two{grid-template-columns:1fr 1fr}
 @media (max-width:400px){.acts{grid-template-columns:1fr 1fr}.acts .btn:first-child{grid-column:1/-1}}
 .sum{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
@@ -301,12 +302,13 @@ function alerta(k, un, cx) { // '' | 'zero' | 'min'
   if (un == null && cx == null) return '';
   if (un == null) return '';                       // nunca contado em unidades: não dá para afirmar nada
   const temCx = cx > 0; const tot = totalUn(k, un, cx);
+  if (un < 0 || (cx != null && cx < 0)) return 'neg';
   if (un <= 0 && !temCx) return 'zero';
   const mn = minDe(k); if (mn == null) return '';
   if (tot != null) return tot < mn ? 'min' : '';
   return (!temCx && (un || 0) < mn) ? 'min' : '';
 }
-function flagTxt(k, un, cx) { const a = alerta(k, un, cx); if (a === 'zero') return ' ❗'; if (a === 'min') return ` ⚠️ mín ${fmt(minDe(k))}`; return ''; }
+function flagTxt(k, un, cx) { const a = alerta(k, un, cx); if (a === 'neg') return ' ❗ (negativo — falta contar)'; if (a === 'zero') return ' ❗'; if (a === 'min') return ` ⚠️ mín ${fmt(minDe(k))}`; return ''; }
 /* ===================== SALDOS (ledger fold) ===================== */
 function aplicar(saldos, saldosCx, m) {
   for (const it of m.itens || []) {
@@ -415,17 +417,18 @@ async function flushPend() { // movements recorded while local -> upload (renumb
   toast(`${ok} lançamento(s) feitos sem conexão foram sincronizados${ok ? ' e renumerados' : ''}`); render();
 }
 /* count draft: shared in db (cnt/atual, update per SKU) or local */
-let cntExists = null;
-async function contSet(patch) { // patch: {k: value|null}
+let cntExists = null, cntFila = Promise.resolve();
+async function gravaCnt(patch) {
+  const ref = S.db.doc('cnt/atual');
+  if (cntExists === null) { const snap = await ref.get(); cntExists = snap.exists; }
+  if (!cntExists) { const it = {}; for (const [k, v] of Object.entries(S.contRasc)) if (v != null) it[k] = v; await withRetry(() => ref.set({ itens: it, atualizadoEm: new Date().toISOString(), por: S.autor || '' })); cntExists = true; }
+  else await withRetry(() => ref.update({ itens: patch, atualizadoEm: new Date().toISOString(), por: S.autor || '' }));
+}
+function contSet(patch) { // patch: {k: valor|null} — grava em fila, senão duas digitações seguidas se atropelam
   for (const [k, v] of Object.entries(patch)) { if (!SAFE_KEY(k)) continue; if (v == null) delete S.contRasc[k]; else S.contRasc[k] = v; }
-  if (S.mode === 'db') {
-    try {
-      const ref = S.db.doc('cnt/atual');
-      if (cntExists === null) { const snap = await ref.get(); cntExists = snap.exists; }
-      if (!cntExists) { const it = {}; for (const [k, v] of Object.entries(patch)) if (v != null) it[k] = v; await withRetry(() => ref.set({ itens: it, atualizadoEm: new Date().toISOString() })); cntExists = true; }
-      else await withRetry(() => ref.update({ itens: patch, atualizadoEm: new Date().toISOString(), por: S.autor || '' }));
-    } catch (e) { console.error(e); toast('Rascunho da contagem não sincronizou: ' + erroTxt(e)); }
-  } else lsSet('contRasc', S.contRasc);
+  if (S.mode !== 'db') { lsSet('contRasc', S.contRasc); return Promise.resolve(); }
+  cntFila = cntFila.then(() => gravaCnt(patch)).catch(e => { console.error(e); toast('Rascunho da contagem não sincronizou: ' + erroTxt(e)); });
+  return cntFila;
 }
 /* ===================== MESSAGE BUILDER ===================== */
 const B = s => `*${s}*`;
@@ -476,16 +479,16 @@ function msgMov(m, comSaldo) {
   const totAcc = accs.reduce((a, it) => a + Math.abs(it.d || 0), 0);
   lines.push('', `Total: ${nsk} SKU${nsk === 1 ? '' : 's'}${tot || !totCx ? ` · ${sign(tot)} un` : ''}${totCx ? ` · ${sign(totCx)} cx cheia${Math.abs(totCx) === 1 ? '' : 's'}` : ''}${totAcc ? ` · ${fmt(totAcc)} acessório${totAcc === 1 ? '' : 's'} junto` : ''}`);
   if (comSaldo) {
-    const z = new Set(), mn = new Set();
-    for (const it of itens) { const s = saldoApos(m, it.k); const a = alerta(it.k, s.un, s.cx); if (a === 'zero') z.add(it.k); else if (a === 'min') mn.add(it.k); }
-    const p = []; if (z.size) p.push(`${z.size} zerado${z.size === 1 ? '' : 's'} ❗`); if (mn.size) p.push(`${mn.size} abaixo do mínimo ⚠️`);
+    const z = new Set(), mn = new Set(), ng = new Set();
+    for (const it of itens) { const s = saldoApos(m, it.k); const a = alerta(it.k, s.un, s.cx); if (a === 'neg') ng.add(it.k); else if (a === 'zero') z.add(it.k); else if (a === 'min') mn.add(it.k); }
+    const p = []; if (ng.size) p.push(`${ng.size} negativo${ng.size === 1 ? '' : 's'} — falta contar ❗`); if (z.size) p.push(`${z.size} zerado${z.size === 1 ? '' : 's'} ❗`); if (mn.size) p.push(`${mn.size} abaixo do mínimo ⚠️`);
     if (p.length) lines.push(p.join(' · '));
   }
   if (lines.some(l => /\bcx\b/.test(l))) lines.push('_cx = caixas cheias (caixa padrão fechada)_');
   return lines.join('\n');
 }
 function famLabel(s) { if (s.l === 'camisetas') return s.v.replace(/^Tam\. /, ''); if (s.l === 'acessorios') return s.n; if (s.w) return s.v.replace(/^[^·]+· /, ''); return s.v; }
-function cellSaldo(k) { const un = S.saldos[k], cx = S.saldosCx[k]; if (un == null && cx == null) return '?'; let t = un == null ? '?' : fmt(un); if (cx) t += `${cx < 0 ? ' ' : '+'}${fmt(cx)}cx`; const a = alerta(k, un, cx); return t + (a === 'zero' ? '❗' : a === 'min' ? '⚠️' : ''); }
+function cellSaldo(k) { const un = S.saldos[k], cx = S.saldosCx[k]; if (un == null && cx == null) return '?'; let t = un == null ? '?' : fmt(un); if (cx) t += `${cx < 0 ? ' ' : '+'}${fmt(cx)}cx`; const a = alerta(k, un, cx); return t + (a === 'zero' || a === 'neg' ? '❗' : a === 'min' ? '⚠️' : ''); }
 function msgEstoque(soLinha) {
   const vis = skusVisiveis().filter(s => !soLinha || s.l === soLinha); const lines = [`📊 ${B('2WHEELS · ESTOQUE' + (soLinha ? ' · ' + (LINHA[soLinha] || '').toUpperCase() : ' COMPLETO'))}`, `${dt(now())}${S.autor ? ' · ' + S.autor : ''}${S.seqMax ? ' · até #' + pad(S.seqMax) : ' · sem lançamentos ainda'}`, ''];
   let tot = 0, totCx = 0, low = 0, zero = 0, semc = 0, n = 0;
@@ -554,7 +557,12 @@ function deltas(it) { // {d, dc} com sinal, para uma linha da cesta
   const sg = S.cart.dir === 'S' ? -1 : 1; return { d: sg * unIt(it), dc: sg * num(it.cxc) };
 }
 function cartTotal() { let un = 0, cx = 0, n = 0; for (const it of S.cart.itens) { const { d, dc } = deltas(it); un += Math.abs(d); cx += Math.abs(dc); n++; } return { un, cx, n }; }
-function hojeInfo() { const d0 = new Date(); d0.setHours(0, 0, 0, 0); const hoje = Object.values(S.movs).filter(m => m.ts >= d0.getTime()); const last = Object.values(S.movs).sort((a, b) => b.ts - a.ts)[0]; return `<div class="sm mu num">${hoje.length} lançamento${hoje.length === 1 ? '' : 's'} hoje${last ? ` · último #${pad(last.seq)} · ${esc(last.autor || '')} ${dt(last.ts)}` : ''}</div>`; }
+function hojeInfo() {
+  const d0 = new Date(); d0.setHours(0, 0, 0, 0); const todos = todosMovs();
+  const hoje = todos.filter(m => m.ts >= d0.getTime()); const last = todos[0];
+  const naoEnviados = todos.filter(m => !m.enviado && m.dir !== 'INV').length;
+  return `<div class="sm mu num">${hoje.length} lançamento${hoje.length === 1 ? '' : 's'} hoje${last ? ` · último #${nro(last)} · ${esc(last.autor || '')} ${dt(last.ts)}` : ''}${naoEnviados ? ` · <b style="color:var(--am)">${naoEnviados} sem mandar pro grupo</b>` : ''}</div>`;
+}
 function renderLancar(m) {
   const c = S.cart; const { un, cx, n } = cartTotal();
   const motivos = MOTIVOS[c.dir] || []; if (!motivos.includes(c.motivo)) c.motivo = motivos[0];
@@ -585,7 +593,7 @@ function renderLancar(m) {
 function casa(s, t) {
   const hay = norm([s.n, s.v, FAMI[s.f].n, LINHA[s.l], s.w, s.k.replace(/[-_]/g, ' ')].join(' '));
   if (hay.includes(t)) return true;
-  if (s.b && (s.b === t || norm('2wl' + s.b).includes(t) || String(s.b).replace(/^0+/, '') === t.replace(/^0+/, ''))) return true;
+  if (s.b && /^\d{3,}$/.test(t) && (s.b === t || norm('2wl' + s.b) === t || String(s.b).replace(/^0+/, '') === t.replace(/^0+/, ''))) return true;
   if (/^\d{5,}$/.test(t) && ((s.e && s.e.includes(t)) || (s.e2 && s.e2.includes(t)))) return true;
   return false;
 }
@@ -595,7 +603,7 @@ function resultados() {
   const vis = skusVisiveis(); const toks = q.split(' ').filter(Boolean);
   const match = s => { if (S.fam && s.l !== S.fam && !(S.fam === 'kits')) return false; if (!toks.length) return true; return toks.every(t => casa(s, t)); };
   for (const s of vis) { if (S.fam === 'kits') break; if (match(s)) { out.push(s); if (out.length >= lim) break; } }
-  if (!S.fam || S.fam === 'kits') { for (const k of CAT.kits) { const hay = norm(k.n + ' ' + k.k + ' kit'); if (!toks.length || toks.every(t => hay.includes(t))) kitsOut.push(k); } }
+  if ((!S.fam || S.fam === 'kits') && !isAJ()) { for (const k of CAT.kits) { const hay = norm(k.n + ' ' + k.k + ' kit'); if (!toks.length || toks.every(t => hay.includes(t))) kitsOut.push(k); } }
   if (!out.length && !kitsOut.length) return { html: `<div class="empty">Nada encontrado para “${esc(S.q)}”. Tente pelo nome curto (ex.: “roof 40”, “fork 10w”, “maxx spray”).</div>` };
   let html = ''; let lastL = '';
   for (const s of out) { if (s.l !== lastL) { html += `<div class="grp">${esc(LINHA[s.l])}</div>`; lastL = s.l; } const un = saldoDe(s.k), cx = saldoCxDe(s.k); html += `<button class="it" data-add="${esc(s.k)}">${thumb(s.k)}<div class="grow"><div class="nm">${esc(s.n)}${ativo(s.k) ? '' : '<span class="badge off">oculto</span>'}${s.ind ? '<span class="badge warn">sem estoque na loja</span>' : ''}</div><div class="vr">${esc(FAMI[s.f].n)} · ${esc(s.v)}</div></div><div class="sd num ${un == null && cx == null ? 'q' : ''}">${esc(saldoStr(un, cx, { semUn: true }))}<small>saldo</small></div></button>`; }
@@ -603,7 +611,7 @@ function resultados() {
   return { html };
 }
 function resumoIt(it) { // cart summary text
-  if (isAJ()) { const p = []; if (it.novo != null && it.novo !== '') p.push(`novo saldo ${fmt(num(it.novo))} un`); if (it.novoCx != null && it.novoCx !== '') p.push(`${fmt(num(it.novoCx))} cx cheia${num(it.novoCx) === 1 ? '' : 's'}`); return p.join(' + ') || 'sem alteração'; }
+  if (isAJ()) { const p = []; if (it.novo != null && it.novo !== '') p.push(`${fmt(num(it.novo))} un`); if (it.novoCx != null && it.novoCx !== '') p.push(`${fmt(num(it.novoCx))} cx cheia${num(it.novoCx) === 1 ? '' : 's'}`); return p.length ? 'novo saldo: ' + p.join(' + ') : 'sem alteração'; }
   const p = []; const u = num(it.un), c = num(it.cx), q = num(it.cxQ), cc = num(it.cxc);
   if (u) p.push(`${fmt(u)} un`); if (c) p.push(`${fmt(c)} cx × ${fmt(q)}`); if (cc) p.push(`${fmt(cc)} cx cheia${cc === 1 ? '' : 's'}`);
   const tot = unIt(it); return (p.join(' + ') || '0') + (c && (u || cc) ? ` (= ${fmt(tot)} un${cc ? ` + ${fmt(cc)} cx` : ''})` : (c ? ` (= ${fmt(tot)} un)` : ''));
@@ -637,7 +645,8 @@ function openQty(k, idx) {
     const neg = (nu != null && nu < 0) || (nc != null && nc < 0);
     const precisaQ = num(it.cx) > 0 && !(num(it.cxQ) > 0);
     const podeAdd = isAJ() ? ((it.novo !== '' && it.novo != null) || (it.novoCx !== '' && it.novoCx != null)) : ((unIt(it) > 0 || num(it.cxc) > 0) && !precisaQ);
-    return { d, dc, nu, nc, neg, precisaQ, podeAdd };
+    const igual = isAJ() && podeAdd && !d && !dc;
+    return { d, dc, nu, nc, neg, precisaQ, podeAdd, igual };
   };
   const draw = () => {
     const { nu, nc, neg, precisaQ, podeAdd } = calc();
@@ -649,7 +658,7 @@ function openQty(k, idx) {
       ${stp('un', 'Unidades soltas')}
       ${stp('cx', 'Caixas com quantidade', `<span>${ultQ(k) ? 'última vez: ' + fmt(ultQ(k)) + ' un por caixa' : 'você digita quantas unidades tem em cada caixa'}</span>`)}
       ${stp('cxc', 'Caixas cheias', '<span>caixa padrão fechada, sem contar por dentro</span>')}`}
-      <div class="qres num">${isAJ() ? '' : `Lança: <b>${esc(resumoIt(it))}</b><br>`}Saldo ${esc(saldoStr(su, sc))} → <b class="${neg ? 'neg' : ''}">${esc(saldoStr(nu, nc))}</b>${neg ? ' <span class="neg">(ficaria negativo)</span>' : ''}</div>
+      <div class="qres num">${isAJ() ? '' : `Lança: <b>${esc(resumoIt(it))}</b><br>`}Saldo ${esc(saldoStr(su, sc))} → <b class="${neg ? 'neg' : ''}">${esc(saldoStr(nu, nc))}</b>${neg ? ' <span class="neg">(ficaria negativo)</span>' : ''}${calc().igual ? ' <span class="mu">— igual ao que já está; serve para registrar que você conferiu</span>' : ''}</div>
     </div>
     <div class="acts two"><button class="btn lg ${dirCls}" id="q-ok" ${podeAdd ? '' : 'disabled'}>${editing ? 'Salvar' : 'Adicionar à cesta'}</button><button class="btn" id="q-cx">${cxPadrao(k) ? 'Caixa cheia = ' + fmt(cxPadrao(k)) + ' un' : 'Quantas cabem na caixa?'}</button></div>`);
     const sh = $('#sheet');
@@ -717,6 +726,7 @@ function bindQx(m) { const x = m.querySelector('#qx'); if (x) x.onclick = () => 
 function bindRes(m) { m.querySelectorAll('[data-add]').forEach(b => b.onclick = () => openQty(b.dataset.add)); m.querySelectorAll('[data-addkit]').forEach(b => b.onclick = () => openKitQty(b.dataset.addkit)); }
 function prontoParaGravar() {
   if (S.mode === 'local') return true;
+  if (S.mode === 'err') { toast('A conexão com o banco caiu. Toque em "tentar de novo" no aviso vermelho antes de lançar.'); return false; }
   if (S.mode !== 'db' || !gotMov || !gotArq) { toast('Ainda carregando os lançamentos do banco — um instante.'); return false; }
   return true;
 }
@@ -737,7 +747,9 @@ async function confirmar() {
   if (semSaldo.length && !(await ask('Produto nunca contado', `${semSaldo.length} item(ns) ainda não têm saldo no app:\n${semSaldo.map(k => '• ' + nomeSku(k)).join('\n')}\n\nSe lançar a saída agora, o saldo fica negativo até você contar. O certo é contar antes, na aba Contagem.`, 'Lançar mesmo assim'))) return;
   const ts = now(); const seq = S.seqMax + 1; const itens = [];
   for (const it of c.itens) {
-    const { d, dc } = deltas(it); if (!d && !dc) continue;
+    const { d, dc } = deltas(it);
+    const mexeAJ = isAJ() && ((it.novo != null && it.novo !== '') || (it.novoCx != null && it.novoCx !== ''));
+    if (!d && !dc && !mexeAJ) continue;
     const o = { k: it.k, un: isAJ() ? Math.abs(d) : num(it.un), cx: isAJ() ? 0 : num(it.cx), cxUn: !isAJ() && num(it.cx) ? num(it.cxQ) : null, cxc: isAJ() ? Math.abs(dc) : num(it.cxc), d, dc };
     if (it.kit) { o.kit = it.kit; o.kitQ = it.kitQ || 1; }
     if (isAJ()) { const su = saldoDe(it.k), sc = saldoCxDe(it.k); o.abs = true; o.esperado = su == null ? null : su; o.esperadoCx = sc == null ? null : sc; o.novo = it.novo == null || it.novo === '' ? null : num(it.novo); o.novoCx = it.novoCx == null || it.novoCx === '' ? null : num(it.novoCx); }
@@ -773,9 +785,10 @@ function openMsg(mov, mode, soLinha) {
       <div class="hint xs">${fmt(text.length)} caracteres · o WhatsApp abre com o texto pronto e você escolhe o grupo.</div>`);
     const sh = $('#sheet');
     sh.querySelectorAll('[data-mode]').forEach(b => b.onclick = () => { cur = b.dataset.mode; draw(); });
-    sh.querySelector('#m-wa').onclick = () => abrirWa(text);
-    sh.querySelector('#m-cp').onclick = async () => { toast((await copiar(text)) ? 'Copiado. Cole no grupo do WhatsApp.' : 'Não deu para copiar automaticamente: selecione o texto acima.'); };
-    sh.querySelector('#m-sh').onclick = async () => { if (!(await compartilhar(text))) toast('Compartilhamento cancelado ou indisponível.'); };
+    const marcar = async () => { if (!mov || mov.enviado || cur === 'estoque' || cur === 'repor' || cur === 'linha') return; try { await patchMov(mov.id, { enviado: true }); if (S.movs[mov.id]) S.movs[mov.id] = { ...S.movs[mov.id], enviado: true }; mov.enviado = true; render(); } catch (e) { console.error(e); } };
+    sh.querySelector('#m-wa').onclick = () => { abrirWa(text); marcar(); };
+    sh.querySelector('#m-cp').onclick = async () => { const ok = await copiar(text); toast(ok ? 'Copiado. Cole no grupo do WhatsApp.' : 'Não deu para copiar automaticamente: selecione o texto acima.'); if (ok) marcar(); };
+    sh.querySelector('#m-sh').onclick = async () => { if (await compartilhar(text)) marcar(); else toast('Compartilhamento cancelado ou indisponível.'); };
   };
   draw();
 }
@@ -788,7 +801,7 @@ function renderEstoque(m) {
   const rows = vis.filter(s => (!S.estLinha || s.l === S.estLinha) && (!toks.length || toks.every(t => casa(s, t))))
     .sort((a, b) => ordLinha(a.l) - ordLinha(b.l) || String(a.f).localeCompare(String(b.f)) || (a.o || 0) - (b.o || 0));
   let list = ''; let lastL = '', lastF = '';
-  for (const s of rows) { const g = s.l === 'suspensao' ? 'Fork Oil ' + s.w : FAMI[s.f].n; if (s.l !== lastL || g !== lastF) { list += `<div class="grp">${esc(LINHA[s.l])} · ${esc(g)}</div>`; lastL = s.l; lastF = g; } const un = S.saldos[s.k], cx = S.saldosCx[s.k]; const mn = minDe(s.k); const a = alerta(s.k, un, cx); const cls = un == null && cx == null ? 'q' : a === 'zero' ? 'z' : a === 'min' ? 'lo' : ''; const tt = totalUn(s.k, un, cx); list += `<button class="srow" data-sku="${esc(s.k)}">${thumb(s.k)}<div class="grow"><div class="nm">${esc(s.l === 'camisetas' ? s.v : s.n)}${ativo(s.k) ? '' : '<span class="badge off">oculto</span>'}${s.acc ? `<span class="badge">${esc(ACC_NOME[s.acc])} no Full</span>` : ''}</div><div class="vr">${cxPadrao(s.k) ? `caixa cheia = ${fmt(cxPadrao(s.k))} un` : (cx ? 'caixas contadas à parte' : '')}${mn != null ? `${cxPadrao(s.k) || cx ? ' · ' : ''}mín ${fmt(mn)}` : ''}${s.b ? ` · ${esc(s.b)}` : ''}</div></div><div class="sd num ${cls}">${un == null ? '?' : fmt(un)}<small>${cx ? `+ ${fmt(cx)} cx cheia${cx === 1 ? '' : 's'}${tt != null && cx ? ` = ${fmt(tt)} un` : ''}` : 'un'}</small></div></button>`; }
+  for (const s of rows) { const g = s.l === 'suspensao' ? 'Fork Oil ' + s.w : FAMI[s.f].n; if (s.l !== lastL || g !== lastF) { list += `<div class="grp">${esc(LINHA[s.l])} · ${esc(g)}</div>`; lastL = s.l; lastF = g; } const un = S.saldos[s.k], cx = S.saldosCx[s.k]; const mn = minDe(s.k); const a = alerta(s.k, un, cx); const cls = un == null && cx == null ? 'q' : (a === 'zero' || a === 'neg') ? 'z' : a === 'min' ? 'lo' : ''; const tt = totalUn(s.k, un, cx); list += `<button class="srow" data-sku="${esc(s.k)}">${thumb(s.k)}<div class="grow"><div class="nm">${esc(s.l === 'camisetas' ? s.v : s.n)}${ativo(s.k) ? '' : '<span class="badge off">oculto</span>'}${s.acc ? `<span class="badge">${esc(ACC_NOME[s.acc])} no Full</span>` : ''}</div><div class="vr">${cxPadrao(s.k) ? `caixa cheia = ${fmt(cxPadrao(s.k))} un` : (cx ? 'caixas contadas à parte' : '')}${mn != null ? `${cxPadrao(s.k) || cx ? ' · ' : ''}mín ${fmt(mn)}` : ''}${s.b ? ` · ${esc(s.b)}` : ''}</div></div><div class="sd num ${cls}">${un == null ? '?' : fmt(un)}<small>${cx ? `+ ${fmt(cx)} cx cheia${cx === 1 ? '' : 's'}${tt != null && cx ? ` = ${fmt(tt)} un` : ''}` : 'un'}</small></div></button>`; }
   const km = kitsMontaveis();
   m.innerHTML = `
   ${bannerModo()}
@@ -834,9 +847,9 @@ function abrirCaixa(k) {
   sheet(`<div class="hd"><h2>Abrir caixa cheia · ${esc(s.n)}</h2><button class="xbtn" data-close aria-label="Fechar">✕</button></div>
   <div class="hint">Quantas unidades tinha dentro da caixa? O app tira 1 caixa cheia e soma essas unidades ao saldo solto.</div>
   <input class="textin num" id="a-q" type="number" inputmode="numeric" min="1" placeholder="unidades na caixa" value="${p || ''}">
-  <button class="sw ${p ? '' : 'on'}" id="a-pad" role="switch" aria-checked="${p ? 'false' : 'true'}"><i></i><span class="sm">Gravar como padrão deste produto (${p ? 'hoje: ' + fmt(p) + ' un' : 'ainda sem padrão'})</span></button>
+  <button class="sw" id="a-pad" role="switch" aria-checked="false"><i></i><span class="sm">Gravar como padrão deste produto (${p ? 'hoje: ' + fmt(p) + ' un' : 'hoje: sem padrão'}) — opcional</span></button>
   <button class="btn g w" id="a-ok">Registrar abertura</button>`);
-  const sh = $('#sheet'); let gravaPad = !p;
+  const sh = $('#sheet'); let gravaPad = false;
   sh.querySelector('#a-pad').onclick = () => { gravaPad = !gravaPad; const b = sh.querySelector('#a-pad'); b.classList.toggle('on', gravaPad); b.setAttribute('aria-checked', gravaPad); };
   sh.querySelector('#a-ok').onclick = async () => {
     const q = num(sh.querySelector('#a-q').value); if (q <= 0) { toast('Informe quantas unidades tinha na caixa.'); return; }
@@ -882,7 +895,7 @@ function renderHistorico(m) {
   const rows = q ? all.filter(x => (x.itens || []).some(it => it && it.k === q)) : all;
   m.innerHTML = `${bannerModo()}<div class="row"><h2 class="grow">Histórico</h2><span class="sm mu num">${fmt(all.length)} lançamentos</span></div>
   ${q ? `<div class="banner g">Mostrando só lançamentos de <b>${esc(nomeSku(q))}</b>. <button id="h-all">ver todos</button></div>` : ''}
-  <div class="list">${rows.slice(0, 200).map(x => { const its = (x.itens || []).filter(Boolean); const prod = its.filter(it => !it.acc); const tot = prod.reduce((a, it) => a + (it.d || 0), 0); const totCx = prod.reduce((a, it) => a + (it.dc || 0), 0); const n = prod.length; return `<button class="hrow ${x.estornadoPor ? 'est' : ''}" data-h="${esc(x.id)}"><div class="l1"><span class="seq">#${esc(nro(x))}</span><span class="typ ${esc(String(x.dir || '').replace(/[^A-Z]/gi, ''))}">${esc(DIRN[x.dir] || x.dir)}</span><span class="sm">${esc(x.dir === 'INV' ? (LINHA[x.linha] || '') : [x.motivo, x.canal].filter(Boolean).join(' · '))}</span><span class="tot num">${x.dir === 'INV' ? n + (n === 1 ? ' SKU' : ' SKUs') : sign(tot) + (totCx ? ` · ${sign(totCx)} cx` : '')}</span></div><div class="l2">${dt(x.ts, true)} · ${esc(x.autor || '')} · ${n} ${n === 1 ? 'item' : 'itens'}${x.obs ? ' · ' + esc(x.obs) : ''}${x.estornadoPor ? ' · estornado' : ''}${x.arquivado ? ' · arquivado' : ''}</div></button>`; }).join('') || '<div class="empty">Nenhum lançamento ainda.</div>'}</div>
+  <div class="list">${rows.slice(0, 200).map(x => { const its = (x.itens || []).filter(Boolean); const prod = its.filter(it => !it.acc); const tot = prod.reduce((a, it) => a + (it.d || 0), 0); const totCx = prod.reduce((a, it) => a + (it.dc || 0), 0); const n = prod.length; return `<button class="hrow ${x.estornadoPor ? 'est' : ''}" data-h="${esc(x.id)}"><div class="l1"><span class="seq">#${esc(nro(x))}</span><span class="typ ${esc(String(x.dir || '').replace(/[^A-Z]/gi, ''))}">${esc(DIRN[x.dir] || x.dir)}</span><span class="sm">${esc(x.dir === 'INV' ? (LINHA[x.linha] || '') : [x.motivo, x.canal].filter(Boolean).join(' · '))}</span><span class="tot num">${x.dir === 'INV' ? n + (n === 1 ? ' SKU' : ' SKUs') : sign(tot) + (totCx ? ` · ${sign(totCx)} cx` : '')}</span></div><div class="l2">${dt(x.ts, true)} · ${esc(x.autor || '')} · ${n} ${n === 1 ? 'item' : 'itens'}${x.obs ? ' · ' + esc(x.obs) : ''}${x.estornadoPor ? ' · estornado' : ''}${x.arquivado ? ' · arquivado' : ''}${!x.enviado && x.dir !== 'INV' ? ' · <b style="color:var(--am)">não mandado pro grupo</b>' : ''}</div></button>`; }).join('') || '<div class="empty">Nenhum lançamento ainda.</div>'}</div>
   ${rows.length > 200 ? `<div class="hint">Mostrando os 200 mais recentes de ${rows.length}.</div>` : ''}`;
   const ha = m.querySelector('#h-all'); if (ha) ha.onclick = () => { S.histQ = ''; render(); };
   m.querySelectorAll('[data-h]').forEach(b => b.onclick = () => openMov(b.dataset.h));
@@ -1028,7 +1041,10 @@ async function fecharPeriodo(dataStr) {
     for (const m of movs) { try { await withRetry(() => S.db.doc('mov/' + m.id).delete()); delete S.movs[m.id]; } catch (e) { console.error(e); sobras.push(m.seq); } }
     S.arqs[arq.id] = arq; recompute(); closeSheet(true); render();
     toast(sobras.length ? `Arquivado, mas ${sobras.length} lançamento(s) não saíram da lista (#${sobras.slice(0, 3).map(s => pad(s)).join(', #')}). Tente fechar de novo.` : `${movs.length} lançamentos arquivados`);
-  } catch (e) { toast('Falhou: ' + erroTxt(e)); }
+  } catch (e) {
+    if (e && e.code === 'quota_exceeded') toast('O banco está cheio e nem o arquivo cabe. Exporte o CSV em Ajustes e apague alguns lançamentos antigos pelo histórico antes de fechar o período.');
+    else toast('Falhou: ' + erroTxt(e));
+  }
 }
 function openAutor(cb) {
   sheet(`<div class="hd"><h2>Quem está lançando?</h2><button class="xbtn" data-close aria-label="Fechar">✕</button></div><div class="hint">Vai no cabeçalho de cada mensagem. Fica guardado neste aparelho.</div><input class="textin" id="a-n" placeholder="Seu nome" value="${esc(S.autor)}" maxlength="30" autocomplete="name"><button class="btn g w" id="a-ok">Salvar</button>`);
