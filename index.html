@@ -74,6 +74,10 @@ h3{font:600 13px/1 var(--fd);letter-spacing:.14em;text-transform:uppercase;color
 .seg button.on-S{background:var(--pfill);color:#fff}
 .seg button.on-E{background:var(--g);color:var(--gink)}
 .seg button.on-AJ{background:var(--sf3);color:var(--tx)}
+.seg.vista{grid-template-columns:repeat(4,1fr);gap:4px;padding:4px}
+.seg.vista button{min-height:52px;flex-direction:column;gap:2px;font-size:14px;letter-spacing:.02em;line-height:1.05;padding:0 2px}
+.seg.vista button b{font:700 17px var(--fd);color:inherit}
+@media (max-width:360px){.seg.vista button{font-size:12px}.seg.vista button b{font-size:15px}}
 .chips{display:flex;gap:8px;overflow-x:auto;padding:2px 2px 6px;scrollbar-width:none;-webkit-overflow-scrolling:touch}
 .chips::-webkit-scrollbar{display:none}
 .chip{flex:0 0 auto;min-height:44px;padding:0 14px;border-radius:999px;background:var(--sf2);border:1px solid var(--bd);color:var(--tx);font:600 15px/1 var(--fd);letter-spacing:.04em;display:flex;align-items:center;gap:6px;white-space:nowrap}
@@ -245,7 +249,7 @@ const S = {
   movs: {}, arqs: {}, cfgSkus: {}, cfgKits: {}, cfgGeral: {},
   saldos: {}, saldosCx: {}, seqMax: 0,
   autor: ls('autor', ''), cart: null,
-  q: '', fam: '', estQ: '', estLinha: '', contLinha: '', contRasc: ls('contRasc', {}) || {}, histQ: '',
+  q: '', fam: '', estQ: '', estLinha: '', estVista: 'com', contLinha: '', contRasc: ls('contRasc', {}) || {}, histQ: '',
   mostrarOcultos: false, unsub: [], pend: ls('pend', []) || [],
 };
 { const c = ls('cart', null); S.cart = (c && typeof c === 'object' && Array.isArray(c.itens)) ? c : { dir: 'S', motivo: 'Venda', canal: 'Mercado Livre', obs: '', itens: [] }; if (!Array.isArray(S.pend)) S.pend = []; if (!S.contRasc || typeof S.contRasc !== 'object') S.contRasc = {}; }
@@ -285,17 +289,35 @@ function kitsMontaveis() {
   }
   return out;
 }
+// 'com' = tem alguma coisa; 'sem' = contado e acabou; 'nao' = nunca contado
+function situacao(k) {
+  const un = S.saldos[k], cx = S.saldosCx[k];
+  if (un == null && cx == null) return 'nao';
+  if ((un || 0) > 0 || (cx || 0) > 0) return 'com';
+  return 'sem';
+}
 function skusVisiveis() { return CAT.skus.filter(s => ativo(s.k) || S.mostrarOcultos); }
 function thumb(k, lg) { const t = THUMBS[k]; if (t) return `<img class="th${lg ? ' lg' : ''}" src="${t}" alt="" loading="lazy">`; const s = SKU[k] || KIT[k]; return `<span class="th ph${lg ? ' lg' : ''}">${esc((s && s.n || '?').slice(0, 2).toUpperCase())}</span>`; }
 function toast(msg, act, fn) { const old = $('.toast'); if (old) old.remove(); const t = document.createElement('div'); t.className = 'toast'; t.setAttribute('role', 'status'); t.innerHTML = `<span>${esc(msg)}</span>${act ? `<button>${esc(act)}</button>` : ''}`; if (act) t.querySelector('button').onclick = () => { t.remove(); fn && fn(); }; document.body.appendChild(t); setTimeout(() => t.remove(), act ? 8000 : 3200); }
 /* saldo = unidades soltas + caixas cheias (caixa padrão de estoque) */
 function saldoDe(k) { return S.saldos[k]; }
 function saldoCxDe(k) { return S.saldosCx[k]; }
-function saldoStr(un, cx, opts) { // "15 un + 3 cx" | "15" | "?"
+// Mostra só o que foi contado: "12 un", "3 cx", "12 un + 3 cx" — e "?" quando ninguém contou.
+function saldoStr(un, cx, opts) {
   const semUn = opts && opts.semUn;
-  if (un == null && cx == null) return '?';
-  const u = un == null ? '?' : fmt(un); const c = cx != null && cx !== 0 ? `${fmt(cx)} cx` : '';
-  if (!c) return u; return `${u}${semUn ? '' : ' un'} ${cx < 0 ? 'e' : '+'} ${c}`;
+  const temU = un != null, temC = cx != null && cx !== 0;
+  if (!temU && !temC) return '?';
+  const p = [];
+  if (temU && (un !== 0 || !temC)) p.push(fmt(un) + (semUn ? '' : ' un'));
+  if (temC) p.push(fmt(cx) + ' cx');
+  if (p.length < 2) return p[0];
+  return p[0] + (cx < 0 ? ' e ' : ' + ') + p[1];
+}
+// Quando a caixa cheia tem quantidade conhecida, o saldo vira um número só: "84 un (12 + 3 cx × 24)"
+function saldoCompleto(k, un, cx) {
+  const t = totalUn(k, un, cx);
+  if (t == null || !cx) return saldoStr(un, cx);
+  return `${fmt(t)} un (${fmt(un || 0)} + ${fmt(cx)} cx × ${fmt(cxPadrao(k))})`;
 }
 function totalUn(k, un, cx) { if (un == null && cx == null) return null; const p = cxPadrao(k); if (cx && !p) return null; return (un || 0) + (cx || 0) * (p || 0); }
 function alerta(k, un, cx) { // '' | 'zero' | 'min'
@@ -530,7 +552,18 @@ function msgMov(m, comSaldo) {
   return lines.join('\n');
 }
 function famLabel(s) { if (s.l === 'camisetas') return s.v.replace(/^Tam\. /, ''); if (s.l === 'acessorios') return s.n; if (s.w) return s.v.replace(/^[^·]+· /, ''); return s.v; }
-function cellSaldo(k) { const un = S.saldos[k], cx = S.saldosCx[k]; if (un == null && cx == null) return '?'; let t = un == null ? '?' : fmt(un); if (cx) t += `${cx < 0 ? ' ' : '+'}${fmt(cx)}cx`; const a = alerta(k, un, cx); return t + (a === 'zero' || a === 'neg' ? '❗' : a === 'min' ? '⚠️' : ''); }
+function cellSaldo(k) {
+  const un = S.saldos[k], cx = S.saldosCx[k];
+  if (un == null && cx == null) return '?';
+  const tt = totalUn(k, un, cx);
+  let t;
+  if (cx && tt != null) t = fmt(tt);                       // caixa com quantidade conhecida: um número só
+  else if (cx && !un) t = `${fmt(cx)}cx`;                  // só caixas fechadas
+  else if (cx) t = `${fmt(un)}+${fmt(cx)}cx`;              // soltas e caixas
+  else t = fmt(un);
+  const a = alerta(k, un, cx);
+  return t + (a === 'zero' || a === 'neg' ? '❗' : a === 'min' ? '⚠️' : '');
+}
 function msgEstoque(soLinha) {
   const vis = skusVisiveis().filter(s => !soLinha || s.l === soLinha); const lines = [`📊 ${B('2WHEELS · ESTOQUE' + (soLinha ? ' · ' + (LINHA[soLinha] || '').toUpperCase() : ' COMPLETO'))}`, `${dt(now())}${S.autor ? ' · ' + S.autor : ''}${S.seqMax ? ' · até #' + pad(S.seqMax) : ' · sem lançamentos ainda'}`, ''];
   let tot = 0, totCx = 0, low = 0, zero = 0, semc = 0, n = 0;
@@ -695,7 +728,7 @@ function openQty(k, idx) {
   const draw = () => {
     const { nu, nc, neg, precisaQ, podeAdd } = calc();
     const stp = (f, lab, extra) => `<div class="qrow"><div class="lab"><span>${lab}</span>${extra || ''}</div><div class="stp"><button data-st="${f}" data-d="-1" aria-label="menos">−</button><input type="number" inputmode="numeric" min="0" data-f="${f}" value="${num(it[f]) || ''}" placeholder="0" aria-label="${lab}"><button data-st="${f}" data-d="1" aria-label="mais">+</button></div>${f === 'cx' ? `<div class="per">× <input type="number" inputmode="numeric" min="1" data-f="cxQ" value="${it.cxQ || ''}" placeholder="quantas?" aria-label="Unidades por caixa"> un por caixa <b class="num" id="q-eq">${num(it.cx) && num(it.cxQ) ? `= ${fmt(num(it.cx) * num(it.cxQ))} un` : ''}</b><span id="q-falta" style="color:var(--am)" ${precisaQ ? '' : 'hidden'}>informe quantas unidades vêm em cada caixa</span></div>` : ''}</div>`;
-    sheet(`<div class="hd">${thumb(k, true)}<div class="grow"><h2>${esc(s.n)}</h2><div class="sm mu">${esc(FAMI[s.f].n)} · ${esc(s.v)} · saldo <b class="num">${esc(saldoStr(su, sc))}</b>${cxPadrao(k) ? ` · caixa cheia = ${fmt(cxPadrao(k))} un` : ''}</div></div><button class="xbtn" data-close aria-label="Fechar">✕</button></div>
+    sheet(`<div class="hd">${thumb(k, true)}<div class="grow"><h2>${esc(s.n)}</h2><div class="sm mu">${esc(FAMI[s.f].n)} · ${esc(s.v)} · saldo <b class="num">${esc(saldoCompleto(k, su, sc))}</b>${!cxPadrao(k) && sc ? ' · caixa cheia sem quantidade definida' : ''}</div></div><button class="xbtn" data-close aria-label="Fechar">✕</button></div>
     <div class="qty">${isAJ() ? `
       <div class="qrow"><div class="lab"><span>Novo saldo em unidades</span><span>hoje: ${esc(su == null ? '?' : fmt(su))}</span></div><div class="stp"><button data-st="novo" data-d="-1" aria-label="menos">−</button><input type="number" inputmode="numeric" min="0" data-f="novo" value="${it.novo === '' || it.novo == null ? '' : num(it.novo)}" placeholder="não mexer" aria-label="Novo saldo em unidades"><button data-st="novo" data-d="1" aria-label="mais">+</button></div></div>
       <div class="qrow"><div class="lab"><span>Novo saldo em caixas cheias</span><span>hoje: ${esc(sc == null ? '?' : fmt(sc))}</span></div><div class="stp"><button data-st="novoCx" data-d="-1" aria-label="menos">−</button><input type="number" inputmode="numeric" min="0" data-f="novoCx" value="${it.novoCx === '' || it.novoCx == null ? '' : num(it.novoCx)}" placeholder="não mexer" aria-label="Novo saldo em caixas cheias"><button data-st="novoCx" data-d="1" aria-label="mais">+</button></div></div>` : `
@@ -842,24 +875,41 @@ function renderEstoque(m) {
   let tot = 0, totCx = 0, low = 0, zero = 0, semc = 0;
   for (const s of vis) { const un = S.saldos[s.k], cx = S.saldosCx[s.k]; if (un == null && cx == null) { semc++; continue; } tot += un || 0; totCx += cx || 0; const a = alerta(s.k, un, cx); if (a === 'zero') zero++; else if (a === 'min') low++; }
   const ordLinha = k => { const i = CAT.linhas.findIndex(l => l.k === k); return i < 0 ? 99 : i; };
-  const rows = vis.filter(s => (!S.estLinha || s.l === S.estLinha) && (!toks.length || toks.every(t => casa(s, t))))
+  const naVista = s => S.estVista === 'todos' || situacao(s.k) === S.estVista;
+  const rows = vis.filter(s => naVista(s) && (!S.estLinha || s.l === S.estLinha) && (!toks.length || toks.every(t => casa(s, t))))
     .sort((a, b) => ordLinha(a.l) - ordLinha(b.l) || String(a.f).localeCompare(String(b.f)) || (a.o || 0) - (b.o || 0));
+  const cont = { com: 0, sem: 0, nao: 0 };
+  for (const s of vis) cont[situacao(s.k)]++;
   let list = ''; let lastL = '', lastF = '';
-  for (const s of rows) { const g = s.l === 'suspensao' ? 'Fork Oil ' + s.w : FAMI[s.f].n; if (s.l !== lastL || g !== lastF) { list += `<div class="grp">${esc(LINHA[s.l])} · ${esc(g)}</div>`; lastL = s.l; lastF = g; } const un = S.saldos[s.k], cx = S.saldosCx[s.k]; const mn = minDe(s.k); const a = alerta(s.k, un, cx); const cls = un == null && cx == null ? 'q' : (a === 'zero' || a === 'neg') ? 'z' : a === 'min' ? 'lo' : ''; const tt = totalUn(s.k, un, cx); list += `<button class="srow" data-sku="${esc(s.k)}">${thumb(s.k)}<div class="grow"><div class="nm">${esc(s.l === 'camisetas' ? s.v : s.n)}${ativo(s.k) ? '' : '<span class="badge off">oculto</span>'}${s.acc ? `<span class="badge">${esc(ACC_NOME[s.acc])} no Full</span>` : ''}</div><div class="vr">${cxPadrao(s.k) ? `caixa cheia = ${fmt(cxPadrao(s.k))} un` : (cx ? 'caixas contadas à parte' : '')}${mn != null ? `${cxPadrao(s.k) || cx ? ' · ' : ''}mín ${fmt(mn)}` : ''}${s.b ? ` · ${esc(s.b)}` : ''}</div></div><div class="sd num ${cls}">${un == null ? '?' : fmt(un)}<small>${cx ? `+ ${fmt(cx)} cx cheia${cx === 1 ? '' : 's'}${tt != null && cx ? ` = ${fmt(tt)} un` : ''}` : 'un'}</small></div></button>`; }
+  for (const s of rows) { const g = s.l === 'suspensao' ? 'Fork Oil ' + s.w : FAMI[s.f].n; if (s.l !== lastL || g !== lastF) { list += `<div class="grp">${esc(LINHA[s.l])} · ${esc(g)}</div>`; lastL = s.l; lastF = g; } const un = S.saldos[s.k], cx = S.saldosCx[s.k]; const mn = minDe(s.k); const a = alerta(s.k, un, cx); const cls = un == null && cx == null ? 'q' : (a === 'zero' || a === 'neg') ? 'z' : a === 'min' ? 'lo' : ''; const tt = totalUn(s.k, un, cx);
+    let big, small;
+    if (un == null && cx == null) { big = '?'; small = 'sem contagem'; }
+    else if (cx && tt != null) { big = fmt(tt); small = `${fmt(un || 0)} un + ${fmt(cx)} cx × ${fmt(cxPadrao(s.k))}`; }
+    else if (cx && !un) { big = fmt(cx); small = cx === 1 ? 'caixa cheia' : 'caixas cheias'; }
+    else if (cx) { big = fmt(un); small = `un + ${fmt(cx)} cx cheia${cx === 1 ? '' : 's'}`; }
+    else { big = fmt(un); small = 'un'; }
+    list += `<button class="srow" data-sku="${esc(s.k)}">${thumb(s.k)}<div class="grow"><div class="nm">${esc(s.l === 'camisetas' ? s.v : s.n)}${ativo(s.k) ? '' : '<span class="badge off">oculto</span>'}${s.acc ? `<span class="badge">${esc(ACC_NOME[s.acc])} no Full</span>` : ''}</div><div class="vr">${cx && !cxPadrao(s.k) ? 'quantas cabem na caixa? toque para dizer' : (cxPadrao(s.k) ? `caixa cheia = ${fmt(cxPadrao(s.k))} un` : '')}${mn != null ? `${cx || cxPadrao(s.k) ? ' · ' : ''}mín ${fmt(mn)}` : ''}${s.b ? ` · ${esc(s.b)}` : ''}</div></div><div class="sd num ${cls}">${big}<small>${small}</small></div></button>`; }
   const km = kitsMontaveis();
   m.innerHTML = `
   ${bannerModo()}
   <div class="row"><h2 class="grow">Estoque</h2><button class="btn sm g" id="e-msg">Enviar estoque</button></div>
-  <div class="sum"><div><b class="num">${fmt(tot)}</b><span>unidades</span></div><div><b class="num">${fmt(totCx)}</b><span>cx cheias</span></div><div class="${low || zero ? (zero ? 'rd' : 'am') : ''}"><b class="num">${fmt(zero + low)}</b><span>zerados / abaixo</span></div><div><b class="num">${fmt(semc)}</b><span>sem contagem</span></div></div>
+  <div class="sum"><div><b class="num">${fmt(tot)}</b><span>unidades soltas</span></div><div><b class="num">${fmt(totCx)}</b><span>caixas cheias</span></div><div class="${low || zero ? (zero ? 'rd' : 'am') : ''}"><b class="num">${fmt(zero + low)}</b><span>zerados / abaixo</span></div><div><b class="num">${fmt(semc)}</b><span>sem contagem</span></div></div>
   ${semc === vis.length ? `<div class="banner am">Nenhum saldo registrado ainda. Faça a <button id="e-cont">contagem inicial</button> por linha na aba Contagem, ou lance entradas.</div>` : ''}
   <div class="search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="eq" type="search" placeholder="Filtrar produto…" value="${esc(S.estQ)}" autocomplete="off" aria-label="Filtrar estoque"></div>
-  <div class="chips">${['', ...CAT.linhas.map(l => l.k)].map(k => `<button class="chip sm ${S.estLinha === k ? 'on' : ''}" data-el="${k}">${k ? esc(LINHA[k]) : 'Tudo'}</button>`).join('')}</div>
-  <div class="list">${list || '<div class="empty">Nenhum produto com esse filtro.</div>'}</div>
-  ${km.length && (!S.estLinha || S.estLinha === 'kits') ? `<h3>Kits montáveis com o saldo atual</h3><div class="list">${km.map(x => `<button class="srow" data-kit="${esc(x.kk)}">${thumb(x.kk)}<div class="grow"><div class="nm">${esc(KIT[x.kk].n)}</div><div class="vr">${kitComp(x.kk).itens.map(c => `${c.q}× ${esc(nomeSku(c.k))}`).join(' · ')}</div></div><div class="sd num ${x.n == null ? 'q' : x.n === 0 ? 'z' : ''}">${fmt(x.n)}<small>${x.incerto ? 'kits (mín.)' : 'kits'}</small></div></button>`).join('')}</div>` : ''}
+  <div class="seg vista" role="radiogroup" aria-label="O que mostrar">
+    <button role="radio" data-ev="com" class="${S.estVista === 'com' ? 'on-E' : ''}" aria-checked="${S.estVista === 'com'}">Com estoque<b>${fmt(cont.com)}</b></button>
+    <button role="radio" data-ev="sem" class="${S.estVista === 'sem' ? 'on-AJ' : ''}" aria-checked="${S.estVista === 'sem'}">Sem estoque<b>${fmt(cont.sem)}</b></button>
+    <button role="radio" data-ev="nao" class="${S.estVista === 'nao' ? 'on-AJ' : ''}" aria-checked="${S.estVista === 'nao'}">Nunca contado<b>${fmt(cont.nao)}</b></button>
+    <button role="radio" data-ev="todos" class="${S.estVista === 'todos' ? 'on-AJ' : ''}" aria-checked="${S.estVista === 'todos'}">Todos<b>${fmt(vis.length)}</b></button>
+  </div>
+  <div class="chips">${['', ...CAT.linhas.map(l => l.k)].map(k => `<button class="chip sm ${S.estLinha === k ? 'on' : ''}" data-el="${k}">${k ? esc(LINHA[k]) : 'Todas as linhas'}</button>`).join('')}</div>
+  <div class="list">${list || `<div class="empty">${S.estVista === 'com' ? 'Nenhum produto com saldo nesse filtro.' : S.estVista === 'sem' ? 'Nenhum produto zerado nesse filtro — bom sinal.' : S.estVista === 'nao' ? 'Todos os produtos desse filtro já foram contados.' : 'Nenhum produto com esse filtro.'}</div>`}</div>
+  ${km.length && (!S.estLinha || S.estLinha === 'kits') && S.estVista !== 'nao' ? `<h3>Kits montáveis com o saldo atual</h3><div class="list">${km.map(x => `<button class="srow" data-kit="${esc(x.kk)}">${thumb(x.kk)}<div class="grow"><div class="nm">${esc(KIT[x.kk].n)}</div><div class="vr">${kitComp(x.kk).itens.map(c => `${c.q}× ${esc(nomeSku(c.k))}`).join(' · ')}</div></div><div class="sd num ${x.n == null ? 'q' : x.n === 0 ? 'z' : ''}">${fmt(x.n)}<small>${x.incerto ? 'kits (mín.)' : 'kits'}</small></div></button>`).join('')}</div>` : ''}
   <div class="row"><button class="sw ${S.mostrarOcultos ? 'on' : ''}" id="e-oc" role="switch" aria-checked="${S.mostrarOcultos}"><i></i><span class="sm">Mostrar também os itens só de tabela B2B (galões de 20 L e versões tampa lacre)</span></button></div>`;
   m.querySelector('#e-msg').onclick = () => openMsg(null, S.estLinha ? 'linha' : 'estoque', S.estLinha);
   const ec = m.querySelector('#e-cont'); if (ec) ec.onclick = () => { S.tab = 'contagem'; render(); };
   const eq = m.querySelector('#eq'); let t; eq.oninput = () => { S.estQ = eq.value; clearTimeout(t); t = setTimeout(() => { const pos = eq.selectionStart; render(); const novo = $('#eq'); if (novo) { novo.focus(); try { novo.setSelectionRange(pos, pos); } catch (e) { } } }, 160); };
+  m.querySelectorAll('[data-ev]').forEach(b => b.onclick = () => { S.estVista = b.dataset.ev; render(); });
   m.querySelectorAll('[data-el]').forEach(b => b.onclick = () => { S.estLinha = b.dataset.el; render(); });
   m.querySelectorAll('[data-sku]').forEach(b => b.onclick = () => openSku(b.dataset.sku));
   m.querySelectorAll('[data-kit]').forEach(b => b.onclick = () => openKitEdit(b.dataset.kit));
@@ -870,7 +920,7 @@ function openSku(k) {
   const s = SKU[k]; if (!s) return; const c = skuCfg(k); const un = S.saldos[k], cx = S.saldosCx[k];
   sheet(`
     <div class="hd">${thumb(k, true)}<h2>${esc(s.n)}</h2><button class="xbtn" data-close aria-label="Fechar">✕</button></div>
-    <div class="kv"><span>Saldo atual</span><span class="v num">${esc(saldoStr(un, cx))}${totalUn(k, un, cx) != null && cx ? ` (= ${fmt(totalUn(k, un, cx))} un)` : ''}</span><span>Linha</span><span>${esc(LINHA[s.l])} · ${esc(FAMI[s.f].n)}</span>${s.t ? `<span>Tray</span><span>id ${s.t}${s.vid ? ' · var ' + s.vid : ''}${s.p != null ? ' · R$ ' + Number(s.p).toLocaleString('pt-BR', { minimumFractionDigits: 2 }) : ''}</span>` : ''}${s.b ? `<span>Código B2B</span><span>${esc(s.b)}</span>` : ''}${s.e ? `<span>Código de barras</span><span class="num">${esc(s.e)}${s.e2 ? ' <span class="xs mu">ou ' + esc(s.e2) + ' (dois cadastrados — confira o rótulo)</span>' : ''}</span>` : ''}${s.acc ? `<span>Full</span><span>sai com ${esc(ACC_NOME[s.acc].toLowerCase())}</span>` : ''}</div>
+    <div class="kv"><span>Saldo atual</span><span class="v num">${esc(saldoCompleto(k, un, cx))}</span><span>Linha</span><span>${esc(LINHA[s.l])} · ${esc(FAMI[s.f].n)}</span>${s.t ? `<span>Tray</span><span>id ${s.t}${s.vid ? ' · var ' + s.vid : ''}${s.p != null ? ' · R$ ' + Number(s.p).toLocaleString('pt-BR', { minimumFractionDigits: 2 }) : ''}</span>` : ''}${s.b ? `<span>Código B2B</span><span>${esc(s.b)}</span>` : ''}${s.e ? `<span>Código de barras</span><span class="num">${esc(s.e)}${s.e2 ? ' <span class="xs mu">ou ' + esc(s.e2) + ' (dois cadastrados — confira o rótulo)</span>' : ''}</span>` : ''}${s.acc ? `<span>Full</span><span>sai com ${esc(ACC_NOME[s.acc].toLowerCase())}</span>` : ''}</div>
     <label class="fl" for="f-cx">Unidades numa caixa cheia — opcional</label>
     <input class="textin num" id="f-cx" type="number" inputmode="numeric" min="0" placeholder="não sei ainda" value="${cxPadrao(k) || ''}">
     <div class="hint xs">Só serve para converter caixas cheias em unidades nos totais. <b>Sem esse número o app funciona igual</b>: conta as caixas cheias à parte ("12 un + 3 cx"). Quando você levantar quantas cabem, dá para preencher tudo de uma vez em Ajustes › Unidades por caixa.</div>
@@ -978,7 +1028,7 @@ function renderContagem(m) {
   m.innerHTML = `${bannerModo()}<div class="row"><h2 class="grow">Contagem</h2><span class="sm mu num" id="c-prog">${feitos}/${rows.length} contados</span></div>
   <div class="hint">Conte uma linha por vez: <b>caixas cheias</b> (caixa padrão fechada) e <b>unidades soltas</b>. Campo vazio = não contado, aquele saldo não muda. Ao salvar, o app registra as diferenças e gera a mensagem. O rascunho fica salvo e outra pessoa pode contar outra prateleira ao mesmo tempo.</div>
   <div class="chips">${linhas.map(l => `<button class="chip sm ${S.contLinha === l.k ? 'on' : ''}" data-cl="${l.k}">${esc(l.n)}</button>`).join('')}</div>
-  <div class="list">${rows.map(s => { const un = S.saldos[s.k], cx = S.saldosCx[s.k]; return `<div class="crow"><div><div class="nm">${esc(s.n)}</div><div class="sys num">sistema: ${esc(saldoStr(un, cx))}</div></div><div><div class="lab">Cx cheias</div><input type="number" inputmode="numeric" min="0" data-ccx="${esc(s.k)}" value="${r['cx:' + s.k] != null ? r['cx:' + s.k] : ''}" class="${r['cx:' + s.k] != null ? 'done' : ''}" aria-label="Caixas cheias contadas"></div><div><div class="lab">Unidades</div><input type="number" inputmode="numeric" min="0" data-cun="${esc(s.k)}" value="${r[s.k] != null ? r[s.k] : ''}" class="${r[s.k] != null ? 'done' : ''}" aria-label="Unidades soltas contadas"></div></div>`; }).join('')}</div>
+  <div class="list">${rows.map(s => { const un = S.saldos[s.k], cx = S.saldosCx[s.k]; return `<div class="crow"><div><div class="nm">${esc(s.n)}</div><div class="sys num">sistema: ${esc(saldoCompleto(s.k, un, cx))}</div></div><div><div class="lab">Cx cheias</div><input type="number" inputmode="numeric" min="0" data-ccx="${esc(s.k)}" value="${r['cx:' + s.k] != null ? r['cx:' + s.k] : ''}" class="${r['cx:' + s.k] != null ? 'done' : ''}" aria-label="Caixas cheias contadas"></div><div><div class="lab">Unidades</div><input type="number" inputmode="numeric" min="0" data-cun="${esc(s.k)}" value="${r[s.k] != null ? r[s.k] : ''}" class="${r[s.k] != null ? 'done' : ''}" aria-label="Unidades soltas contadas"></div></div>`; }).join('')}</div>
   <div class="footbar"><div class="acts"><button class="btn lg g" id="c-save" ${feitos ? '' : 'disabled'}>Salvar contagem · ${feitos}</button><button class="btn" id="c-zero">Zerar não contados</button><button class="btn" id="c-clear">Limpar</button></div></div>`;
   const refresh = () => { const f = rows.filter(contado).length; const btn = m.querySelector('#c-save'); if (btn) { btn.disabled = !f; btn.textContent = `Salvar contagem · ${f}`; } const p = m.querySelector('#c-prog'); if (p) p.textContent = `${f}/${rows.length} contados`; };
   const bindNum = (sel, keyOf) => m.querySelectorAll(sel).forEach(i => { i.onchange = () => { contSet({ [keyOf(i)]: i.value === '' ? null : Math.max(0, num(i.value)) }); i.classList.toggle('done', i.value !== ''); refresh(); }; i.onfocus = () => i.select(); i.onkeydown = e => { if (e.key === 'Enter') { const all = [...m.querySelectorAll('.crow input')]; const n = all[all.indexOf(i) + 1]; if (n) n.focus(); else i.blur(); } }; });
