@@ -1,0 +1,10 @@
+{
+  "name": "estoque-2wheels",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Controle de estoque da 2Wheels: site estatico + API do banco compartilhado no Vercel Blob",
+  "dependencies": {
+    "@vercel/blob": "latest"
+  }
+}
