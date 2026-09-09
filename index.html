@@ -254,6 +254,7 @@ const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&a
 const fmt = n => (n == null ? '?' : (n < 0 ? '−' : '') + Math.abs(Number(n)).toLocaleString('pt-BR'));
 const sign = n => (n > 0 ? '+' : n < 0 ? '−' : '') + fmt(Math.abs(n));
 const pad = (n, w = 4) => String(n == null ? 0 : n).padStart(w, '0');
+const nro = m => pad(m && m.seq) + ((m && S.rot && S.rot[m.id]) || ''); // número do lançamento como as pessoas veem
 const now = () => Date.now();
 const dt = (ts, full) => { const d = new Date(ts); const p = n => String(n).padStart(2, '0'); return `${p(d.getDate())}/${p(d.getMonth() + 1)}${full ? '/' + d.getFullYear() : ''} ${p(d.getHours())}:${p(d.getMinutes())}`; };
 const uid = () => 'm' + now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
@@ -298,8 +299,9 @@ function saldoStr(un, cx, opts) { // "15 un + 3 cx" | "15" | "?"
 function totalUn(k, un, cx) { if (un == null && cx == null) return null; const p = cxPadrao(k); if (cx && !p) return null; return (un || 0) + (cx || 0) * (p || 0); }
 function alerta(k, un, cx) { // '' | 'zero' | 'min'
   if (un == null && cx == null) return '';
+  if (un == null) return '';                       // nunca contado em unidades: não dá para afirmar nada
   const temCx = cx > 0; const tot = totalUn(k, un, cx);
-  if ((un || 0) <= 0 && !temCx) return 'zero';
+  if (un <= 0 && !temCx) return 'zero';
   const mn = minDe(k); if (mn == null) return '';
   if (tot != null) return tot < mn ? 'min' : '';
   return (!temCx && (un || 0) < mn) ? 'min' : '';
@@ -327,6 +329,13 @@ function recompute() {
   for (const m of movs) { if (m.seq > seqMax) seqMax = m.seq; aplicar(saldos, saldosCx, m); }
   for (const a of Object.values(S.arqs)) if (a && (a.seqAte || 0) > seqMax) seqMax = a.seqAte;
   S.saldos = saldos; S.saldosCx = saldosCx; S.seqMax = seqMax;
+  // dois aparelhos podem gravar o mesmo número; quem chegou depois ganha uma letra (#0007b)
+  S.rot = {}; const porSeq = {};
+  for (const m of todosMovs()) { if (!m || m.seq == null) continue; (porSeq[m.seq] = porSeq[m.seq] || []).push(m); }
+  for (const lista of Object.values(porSeq)) {
+    if (lista.length < 2) continue;
+    ordenar(lista).forEach((m, i) => { if (i) S.rot[m.id] = String.fromCharCode(98 + Math.min(i - 1, 24)); });
+  }
 }
 function saldoApos(m, k) { // {un, cx} right after movement m (replays ledger up to it, inclusive)
   const base = baseArq(); const saldos = {}, saldosCx = {};
@@ -370,9 +379,14 @@ function erroTxt(e) {
   const m = { quota_exceeded: 'o banco atingiu o limite de registros — use "Fechar período" em Ajustes', resource_exhausted: 'muitas operações seguidas — espere alguns segundos e tente de novo', revoked: 'o acesso ao banco foi revogado — recarregue a página', not_granted: 'este aparelho não recebeu acesso ao banco — abra o app pelo claude.ai', capability_disabled: 'o banco não está disponível nesta versão da página — recarregue', capability_removed: 'o banco não está disponível nesta versão da página — recarregue', invalid_argument: 'o banco recusou o dado enviado (registro grande demais ou apagado por outro aparelho)', transform_error: 'o banco recusou o dado enviado', unavailable: 'o banco não respondeu — tente de novo em alguns segundos' };
   return m[e.code] || e.message || String(e);
 }
+function guardarLocal(mov) { const l = LOCAL.get(); l.movs[mov.id] = mov; LOCAL.set(l); S.movs[mov.id] = mov; if (!S.pend.includes(mov.id)) S.pend.push(mov.id); lsSet('pend', S.pend); recompute(); }
 async function putMov(mov) {
-  if (S.mode === 'db') { await withRetry(() => S.db.doc('mov/' + mov.id).set(mov)); }
-  else { S.movs[mov.id] = mov; S.pend.push(mov.id); lsSet('pend', S.pend); saveLocal(); recompute(); }
+  if (S.mode !== 'db') { guardarLocal(mov); return { local: true }; }
+  try { await withRetry(() => S.db.doc('mov/' + mov.id).set(mov)); return {}; }
+  catch (e) {
+    if (e && (e.code === 'unavailable' || e.code === 'resource_exhausted')) { guardarLocal(mov); flushed = false; return { local: true, motivo: erroTxt(e) }; }
+    throw e;
+  }
 }
 async function patchMov(id, patch) {
   if (S.mode === 'db') { await withRetry(() => S.db.doc('mov/' + id).update(patch)); }
@@ -430,7 +444,7 @@ function cabecalho(m) {
   else if (m.dir === 'INV') t = `🔢 ${B('2WHEELS · ' + (m.inicial ? 'INVENTÁRIO INICIAL' : 'CONTAGEM') + (m.linha ? ' · ' + (LINHA[m.linha] || m.linha) : ''))}`;
   else if (m.dir === 'EST') t = `↩️ ${B('2WHEELS · ESTORNO de #' + pad(m.estornaSeq))}`;
   else t = `📦 ${B('2WHEELS')}`;
-  return `${t}\n#${pad(m.seq)} · ${dt(m.ts)}${who}${m.obs ? `\nObs: ${m.obs}` : ''}`;
+  return `${t}\n#${nro(m)} · ${dt(m.ts)}${who}${m.obs ? `\nObs: ${m.obs}` : ''}${m.reenvio ? '\n_(reenvio: os saldos são os do momento deste lançamento)_' : ''}`;
 }
 function difTxt(it) { const p = []; const temCx = it.esperadoCx != null && it.novoCx != null && it.novoCx !== it.esperadoCx; if (it.esperado != null && it.novo != null && it.novo !== it.esperado) p.push(sign(it.novo - it.esperado) + (temCx ? ' un' : '')); if (temCx) p.push(sign(it.novoCx - it.esperadoCx) + ' cx cheia' + (Math.abs(it.novoCx - it.esperadoCx) === 1 ? '' : 's')); return p.length ? ` (${p.join(' e ')})` : ''; }
 function msgMov(m, comSaldo) {
@@ -471,9 +485,9 @@ function msgMov(m, comSaldo) {
   return lines.join('\n');
 }
 function famLabel(s) { if (s.l === 'camisetas') return s.v.replace(/^Tam\. /, ''); if (s.l === 'acessorios') return s.n; if (s.w) return s.v.replace(/^[^·]+· /, ''); return s.v; }
-function cellSaldo(k) { const un = S.saldos[k], cx = S.saldosCx[k]; if (un == null && cx == null) return '?'; let t = un == null ? '?' : fmt(un); if (cx) t += `+${fmt(cx)}cx`; const a = alerta(k, un, cx); return t + (a === 'zero' ? '❗' : a === 'min' ? '⚠️' : ''); }
-function msgEstoque() {
-  const vis = skusVisiveis(); const lines = [`📊 ${B('2WHEELS · ESTOQUE COMPLETO')}`, `${dt(now())}${S.autor ? ' · ' + S.autor : ''}${S.seqMax ? ' · até #' + pad(S.seqMax) : ' · sem lançamentos ainda'}`, ''];
+function cellSaldo(k) { const un = S.saldos[k], cx = S.saldosCx[k]; if (un == null && cx == null) return '?'; let t = un == null ? '?' : fmt(un); if (cx) t += `${cx < 0 ? ' ' : '+'}${fmt(cx)}cx`; const a = alerta(k, un, cx); return t + (a === 'zero' ? '❗' : a === 'min' ? '⚠️' : ''); }
+function msgEstoque(soLinha) {
+  const vis = skusVisiveis().filter(s => !soLinha || s.l === soLinha); const lines = [`📊 ${B('2WHEELS · ESTOQUE' + (soLinha ? ' · ' + (LINHA[soLinha] || '').toUpperCase() : ' COMPLETO'))}`, `${dt(now())}${S.autor ? ' · ' + S.autor : ''}${S.seqMax ? ' · até #' + pad(S.seqMax) : ' · sem lançamentos ainda'}`, ''];
   let tot = 0, totCx = 0, low = 0, zero = 0, semc = 0, n = 0;
   for (const l of CAT.linhas) {
     const inL = vis.filter(s => s.l === l.k); if (!inL.length) continue;
@@ -485,7 +499,7 @@ function msgEstoque() {
       lines.push(`${g === l.n ? '' : g + ': '}${parts.join(' · ')}`);
     }
   }
-  const km = kitsMontaveis().filter(x => x.n == null || x.n > 0 || x.incerto); if (km.length) { lines.push(B('Kits montáveis com o saldo')); for (const x of km) lines.push(`${KIT[x.kk].n}: ${x.n == null ? '?' : fmt(x.n)}${x.incerto ? ' (no mínimo — há caixas sem quantidade)' : ''}`); }
+  const km = kitsMontaveis().filter(x => x.n > 0 || x.incerto); if (km.length) { lines.push(B('Kits montáveis com o saldo')); for (const x of km) lines.push(`${KIT[x.kk].n}: ${x.n == null ? '?' : fmt(x.n)}${x.incerto ? ' (no mínimo — há caixas sem quantidade)' : ''}`); }
   lines.push('', `Total: ${n} SKUs · ${fmt(tot)} un${totCx ? ` ${totCx < 0 ? 'e' : '+'} ${fmt(totCx)} cx cheias` : ''}${low ? ` · ${low} abaixo do mínimo` : ''}${zero ? ` · ${zero} zerado${zero === 1 ? '' : 's'}` : ''}${semc ? ` · ${semc} sem contagem` : ''}`);
   if (totCx) lines.push('_cx = caixas cheias (caixa padrão fechada)_');
   return lines.join('\n');
@@ -498,7 +512,7 @@ function msgRepor() {
   lines.push('', `${n} ${n === 1 ? 'item' : 'itens'}`);
   return lines.join('\n');
 }
-function buildMsg(mode, m) { if (mode === 'mov') return msgMov(m, false); if (mode === 'movsaldo') return msgMov(m, true); if (mode === 'estoque') return msgEstoque(); if (mode === 'repor') return msgRepor(); return ''; }
+function buildMsg(mode, m, soLinha) { if (mode === 'mov') return msgMov(m, false); if (mode === 'movsaldo') return msgMov(m, true); if (mode === 'estoque') return msgEstoque(); if (mode === 'linha') return msgEstoque(soLinha); if (mode === 'repor') return msgRepor(); return ''; }
 async function copiar(text) { try { if (navigator.clipboard && navigator.clipboard.writeText) { await navigator.clipboard.writeText(text); return true; } } catch (e) { } try { const ta = document.createElement('textarea'); ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0'; document.body.appendChild(ta); ta.select(); const ok = document.execCommand('copy'); ta.remove(); return ok; } catch (e2) { return false; } }
 function abrirWa(text) {
   const url = 'https://wa.me/?text=' + encodeURIComponent(text);
@@ -510,12 +524,15 @@ async function compartilhar(text) { if (navigator.share) { try { await navigator
 /* ===================== RENDER ===================== */
 function renderStatus() {
   const el = $('#st'); if (!el) return;
-  const map = { boot: ['', 'conectando…'], db: ['ok', 'sincronizado'], local: ['local', 'só neste aparelho'], err: ['err', 'erro no banco'] };
+  const map = { boot: ['', 'conectando…'], db: ['ok', 'sincronizado'], local: ['local', TEM_RUNTIME ? 'só neste aparelho' : 'versão aberta'], err: ['err', 'erro no banco'] };
   const [cls, txt] = map[S.mode] || map.boot; el.className = 'st ' + cls; el.innerHTML = `<i></i><span>${esc(txt)}${S.autor ? ' · ' + esc(S.autor) : ''}</span>`;
 }
 function render() { const m = $('#main'); if (!m) return; const y = window.scrollY; document.querySelectorAll('.tab').forEach(b => { const on = b.dataset.tab === S.tab; b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); }); ({ lancar: renderLancar, estoque: renderEstoque, historico: renderHistorico, contagem: renderContagem })[S.tab](m); window.scrollTo(0, y); }
+const TEM_RUNTIME = !!(typeof window !== 'undefined' && window.claude && typeof window.claude.use === 'function');
 function bannerModo() {
-  if (S.mode === 'local') return `<div class="banner am">Sem banco compartilhado: os lançamentos ficam <b>só neste aparelho</b>. Ao abrir o app pelo claude.ai com o banco disponível, eles sobem sozinhos.${S.pend.length ? ` <b>${S.pend.length} pendente(s)</b>.` : ''}</div>`;
+  if (S.mode === 'local') return TEM_RUNTIME
+    ? `<div class="banner am">O banco compartilhado não respondeu: os lançamentos ficam <b>só neste aparelho</b> e sobem sozinhos quando ele voltar.${S.pend.length ? ` <b>${S.pend.length} esperando</b>.` : ''}</div>`
+    : `<div class="banner am">Esta é a <b>versão aberta</b>, para conhecer e testar: o que você lançar fica <b>só neste navegador</b> e não vai para lugar nenhum. O estoque de verdade, compartilhado entre as pessoas, é o app aberto pelo claude.ai.</div>`;
   if (S.mode === 'err') return `<div class="banner rd">A conexão com o banco compartilhado caiu. <button id="b-recon">tentar de novo</button> — enquanto isso, não lance nada para não gravar em cima de saldo desatualizado.</div>`;
   if (!S.autor) return `<div class="banner g">Diga quem está lançando: <button id="b-autor">definir meu nome</button>. Ele vai em todas as mensagens.</div>`;
   return '';
@@ -591,8 +608,14 @@ function resumoIt(it) { // cart summary text
   if (u) p.push(`${fmt(u)} un`); if (c) p.push(`${fmt(c)} cx × ${fmt(q)}`); if (cc) p.push(`${fmt(cc)} cx cheia${cc === 1 ? '' : 's'}`);
   const tot = unIt(it); return (p.join(' + ') || '0') + (c && (u || cc) ? ` (= ${fmt(tot)} un${cc ? ` + ${fmt(cc)} cx` : ''})` : (c ? ` (= ${fmt(tot)} un)` : ''));
 }
+function somaOutras(it, i) { // o que as OUTRAS linhas do mesmo produto já mexem
+  let d = 0, dc = 0;
+  S.cart.itens.forEach((x, j) => { if (j === i || x.k !== it.k) return; const r = deltas(x); d += r.d; dc += r.dc; });
+  return { d, dc };
+}
 function cartLine(it, i) {
-  const s = SKU[it.k]; const su = saldoDe(it.k), sc = saldoCxDe(it.k); const { d, dc } = deltas(it);
+  const s = SKU[it.k]; const su = saldoDe(it.k), sc = saldoCxDe(it.k); const r0 = deltas(it); const o = somaOutras(it, i);
+  const d = r0.d + o.d, dc = r0.dc + o.dc;
   const nu = su == null ? (isAJ() && it.novo != null && it.novo !== '' ? num(it.novo) : (d ? d : null)) : su + d;
   const nc = sc == null ? (isAJ() && it.novoCx != null && it.novoCx !== '' ? num(it.novoCx) : (dc ? dc : null)) : sc + dc;
   const neg = (nu != null && nu < 0) || (nc != null && nc < 0);
@@ -701,8 +724,17 @@ async function confirmar() {
   const c = S.cart; if (!c.itens.length) return;
   if (!prontoParaGravar()) return;
   if (!S.autor) { openAutor(() => confirmar()); return; }
-  const neg = c.itens.filter(it => { const su = saldoDe(it.k), sc = saldoCxDe(it.k); const { d, dc } = deltas(it); return (su != null && su + d < 0) || (sc != null && sc + dc < 0); });
-  if (neg.length && !(await ask('Saldo ficaria negativo', `${neg.length} item(ns) ficaria(m) com saldo negativo:\n${neg.map(it => '• ' + nomeSku(it.k)).join('\n')}\n\nLançar mesmo assim?`, 'Lançar assim mesmo'))) return;
+  // soma as linhas do mesmo produto antes de julgar o saldo
+  const porSku = {};
+  for (const it of c.itens) { const { d, dc } = deltas(it); const a = porSku[it.k] = porSku[it.k] || { d: 0, dc: 0 }; a.d += d; a.dc += dc; }
+  const neg = [], semSaldo = [];
+  for (const [k, a] of Object.entries(porSku)) {
+    const su = saldoDe(k), sc = saldoCxDe(k);
+    if ((su != null && su + a.d < 0) || (sc != null && sc + a.dc < 0)) neg.push(k);
+    else if (su == null && a.d < 0) semSaldo.push(k);
+  }
+  if (neg.length && !(await ask('Saldo ficaria negativo', `${neg.length} item(ns) ficaria(m) com saldo negativo:\n${neg.map(k => '• ' + nomeSku(k)).join('\n')}\n\nLançar mesmo assim?`, 'Lançar assim mesmo'))) return;
+  if (semSaldo.length && !(await ask('Produto nunca contado', `${semSaldo.length} item(ns) ainda não têm saldo no app:\n${semSaldo.map(k => '• ' + nomeSku(k)).join('\n')}\n\nSe lançar a saída agora, o saldo fica negativo até você contar. O certo é contar antes, na aba Contagem.`, 'Lançar mesmo assim'))) return;
   const ts = now(); const seq = S.seqMax + 1; const itens = [];
   for (const it of c.itens) {
     const { d, dc } = deltas(it); if (!d && !dc) continue;
@@ -716,20 +748,23 @@ async function confirmar() {
   if (!itens.length) { toast('Nada a lançar: preencha as quantidades.'); return; }
   const mov = { id: uid(), seq, ts, dia: new Date(ts).toISOString().slice(0, 10), dir: c.dir, motivo: c.dir === 'AJ' ? 'Ajuste' : c.motivo, canal: c.canal || '', obs: (c.obs || '').trim(), autor: S.autor, itens, criadoEm: new Date(ts).toISOString() };
   const btn = $('#confirm'); if (btn) { btn.disabled = true; btn.textContent = 'Salvando…'; }
-  try { await putMov(mov); } catch (e) { console.error(e); toast('Não salvou: ' + erroTxt(e)); render(); return; }
+  let r;
+  try { r = await putMov(mov); } catch (e) { console.error(e); toast('Não salvou: ' + erroTxt(e)); render(); return; }
   S.movs[mov.id] = mov; recompute();
+  if (r && r.local) toast('Sem conexão com o banco: guardado neste aparelho e sobe sozinho quando voltar.');
   S.cart = { dir: c.dir, motivo: c.motivo, canal: c.canal, obs: '', itens: [], accFull: c.accFull }; saveCart(); S.q = '';
   render(); openMsg(mov, 'movsaldo');
-  setTimeout(() => toast(`Lançado #${pad(mov.seq)}`, 'Desfazer', () => estornar(mov, 'desfeito na hora')), 300);
+  setTimeout(() => toast(`Lançado #${nro(mov)}`, 'Desfazer', () => estornar(mov, 'desfeito na hora')), 300);
 }
 /* ---------- MESSAGE SHEET ---------- */
-function openMsg(mov, mode) {
+function openMsg(mov, mode, soLinha) {
   const modes = mov ? [['mov', 'Só a movimentação'], ['movsaldo', 'Movimentação + saldo'], ['estoque', 'Estoque completo'], ['repor', 'Só zerados / abaixo do mínimo']] : [['estoque', 'Estoque completo'], ['repor', 'Só zerados / abaixo do mínimo']];
+  if (soLinha && !mov) modes.splice(1, 0, ['linha', 'Só a linha ' + (LINHA[soLinha] || '')]);
   let cur = mode || modes[0][0];
   const draw = () => {
-    const text = buildMsg(cur, mov); const longo = text.length > 3500;
+    const text = buildMsg(cur, mov, soLinha); const longo = text.length > 3500;
     sheet(`
-      <div class="hd"><h2>${mov ? `Lançado #${esc(pad(mov.seq))}` : 'Mensagem de estoque'}</h2><button class="xbtn" data-close aria-label="Fechar">✕</button></div>
+      <div class="hd"><h2>${mov ? `Lançado #${esc(nro(mov))}` : 'Mensagem de estoque'}</h2><button class="xbtn" data-close aria-label="Fechar">✕</button></div>
       <div class="hint">${mov ? 'Saldo já atualizado. Escolha o que vai para o grupo de controle:' : 'Escolha o que vai para o grupo de controle:'}</div>
       <div class="modes" role="tablist">${modes.map(([k, n]) => `<button role="tab" data-mode="${k}" class="${cur === k ? 'on' : ''}" aria-selected="${cur === k}">${n}</button>`).join('')}</div>
       <pre class="msg" id="msgtxt">${esc(text)}</pre>
@@ -765,7 +800,7 @@ function renderEstoque(m) {
   <div class="list">${list || '<div class="empty">Nenhum produto com esse filtro.</div>'}</div>
   ${km.length && (!S.estLinha || S.estLinha === 'kits') ? `<h3>Kits montáveis com o saldo atual</h3><div class="list">${km.map(x => `<button class="srow" data-kit="${esc(x.kk)}">${thumb(x.kk)}<div class="grow"><div class="nm">${esc(KIT[x.kk].n)}</div><div class="vr">${kitComp(x.kk).itens.map(c => `${c.q}× ${esc(nomeSku(c.k))}`).join(' · ')}</div></div><div class="sd num ${x.n == null ? 'q' : x.n === 0 ? 'z' : ''}">${fmt(x.n)}<small>${x.incerto ? 'kits (mín.)' : 'kits'}</small></div></button>`).join('')}</div>` : ''}
   <div class="row"><button class="sw ${S.mostrarOcultos ? 'on' : ''}" id="e-oc" role="switch" aria-checked="${S.mostrarOcultos}"><i></i><span class="sm">Mostrar também os itens só de tabela B2B (galões de 20 L e versões tampa lacre)</span></button></div>`;
-  m.querySelector('#e-msg').onclick = () => openMsg(null, 'estoque');
+  m.querySelector('#e-msg').onclick = () => openMsg(null, S.estLinha ? 'linha' : 'estoque', S.estLinha);
   const ec = m.querySelector('#e-cont'); if (ec) ec.onclick = () => { S.tab = 'contagem'; render(); };
   const eq = m.querySelector('#eq'); let t; eq.oninput = () => { S.estQ = eq.value; clearTimeout(t); t = setTimeout(() => { const pos = eq.selectionStart; render(); const novo = $('#eq'); if (novo) { novo.focus(); try { novo.setSelectionRange(pos, pos); } catch (e) { } } }, 160); };
   m.querySelectorAll('[data-el]').forEach(b => b.onclick = () => { S.estLinha = b.dataset.el; render(); });
@@ -847,7 +882,7 @@ function renderHistorico(m) {
   const rows = q ? all.filter(x => (x.itens || []).some(it => it && it.k === q)) : all;
   m.innerHTML = `${bannerModo()}<div class="row"><h2 class="grow">Histórico</h2><span class="sm mu num">${fmt(all.length)} lançamentos</span></div>
   ${q ? `<div class="banner g">Mostrando só lançamentos de <b>${esc(nomeSku(q))}</b>. <button id="h-all">ver todos</button></div>` : ''}
-  <div class="list">${rows.slice(0, 200).map(x => { const its = (x.itens || []).filter(Boolean); const prod = its.filter(it => !it.acc); const tot = prod.reduce((a, it) => a + (it.d || 0), 0); const totCx = prod.reduce((a, it) => a + (it.dc || 0), 0); const n = prod.length; return `<button class="hrow ${x.estornadoPor ? 'est' : ''}" data-h="${esc(x.id)}"><div class="l1"><span class="seq">#${esc(pad(x.seq))}</span><span class="typ ${esc(String(x.dir || '').replace(/[^A-Z]/gi, ''))}">${esc(DIRN[x.dir] || x.dir)}</span><span class="sm">${esc(x.dir === 'INV' ? (LINHA[x.linha] || '') : [x.motivo, x.canal].filter(Boolean).join(' · '))}</span><span class="tot num">${x.dir === 'INV' ? n + (n === 1 ? ' SKU' : ' SKUs') : sign(tot) + (totCx ? ` · ${sign(totCx)} cx` : '')}</span></div><div class="l2">${dt(x.ts, true)} · ${esc(x.autor || '')} · ${n} ${n === 1 ? 'item' : 'itens'}${x.obs ? ' · ' + esc(x.obs) : ''}${x.estornadoPor ? ' · estornado' : ''}${x.arquivado ? ' · arquivado' : ''}</div></button>`; }).join('') || '<div class="empty">Nenhum lançamento ainda.</div>'}</div>
+  <div class="list">${rows.slice(0, 200).map(x => { const its = (x.itens || []).filter(Boolean); const prod = its.filter(it => !it.acc); const tot = prod.reduce((a, it) => a + (it.d || 0), 0); const totCx = prod.reduce((a, it) => a + (it.dc || 0), 0); const n = prod.length; return `<button class="hrow ${x.estornadoPor ? 'est' : ''}" data-h="${esc(x.id)}"><div class="l1"><span class="seq">#${esc(nro(x))}</span><span class="typ ${esc(String(x.dir || '').replace(/[^A-Z]/gi, ''))}">${esc(DIRN[x.dir] || x.dir)}</span><span class="sm">${esc(x.dir === 'INV' ? (LINHA[x.linha] || '') : [x.motivo, x.canal].filter(Boolean).join(' · '))}</span><span class="tot num">${x.dir === 'INV' ? n + (n === 1 ? ' SKU' : ' SKUs') : sign(tot) + (totCx ? ` · ${sign(totCx)} cx` : '')}</span></div><div class="l2">${dt(x.ts, true)} · ${esc(x.autor || '')} · ${n} ${n === 1 ? 'item' : 'itens'}${x.obs ? ' · ' + esc(x.obs) : ''}${x.estornadoPor ? ' · estornado' : ''}${x.arquivado ? ' · arquivado' : ''}</div></button>`; }).join('') || '<div class="empty">Nenhum lançamento ainda.</div>'}</div>
   ${rows.length > 200 ? `<div class="hint">Mostrando os 200 mais recentes de ${rows.length}.</div>` : ''}`;
   const ha = m.querySelector('#h-all'); if (ha) ha.onclick = () => { S.histQ = ''; render(); };
   m.querySelectorAll('[data-h]').forEach(b => b.onclick = () => openMov(b.dataset.h));
@@ -856,13 +891,13 @@ function renderHistorico(m) {
 function openMov(id) {
   const x = todosMovs().find(m => m.id === id); if (!x) return;
   const est = x.estornadoPor ? todosMovs().find(m => m.id === x.estornadoPor) : null;
-  sheet(`<div class="hd"><h2>#${esc(pad(x.seq))} · ${esc(DIRN[x.dir] || x.dir)}</h2><button class="xbtn" data-close aria-label="Fechar">✕</button></div>
+  sheet(`<div class="hd"><h2>#${esc(nro(x))} · ${esc(DIRN[x.dir] || x.dir)}</h2><button class="xbtn" data-close aria-label="Fechar">✕</button></div>
   <div class="sm mu">${dt(x.ts, true)} · ${esc(x.autor || '')}${x.motivo ? ' · ' + esc(x.motivo) : ''}${x.canal ? ' · ' + esc(x.canal) : ''}${x.obs ? '<br>Obs: ' + esc(x.obs) : ''}${est ? `<br><b>Estornado</b> pelo #${pad(est.seq)} em ${dt(est.ts, true)}` : ''}${x.estornaSeq ? `<br>Estorno do #${pad(x.estornaSeq)}` : ''}</div>
   <div class="detail">${(x.itens || []).filter(Boolean).map(it => `<div class="li"><span>${esc(nomeSku(it.k))}${it.kit ? ` <span class="badge kit">${esc(KIT[it.kit] ? KIT[it.kit].n : it.kit)}</span>` : ''}${it.acc ? ' <span class="badge">acessório</span>' : ''}</span><b class="num">${x.dir === 'INV' ? `${esc(saldoStr(it.esperado, it.esperadoCx))} → ${esc(saldoStr(it.novo != null ? it.novo : it.esperado, it.novoCx != null ? it.novoCx : it.esperadoCx))}` : esc(qtdTxt(it) + cxTxt(it))}</b></div>`).join('')}</div>
   <div class="acts"><button class="btn g" id="h-msg">Reenviar</button><button class="btn dg" id="h-est" ${x.estornadoPor || x.dir === 'EST' || x.dir === 'INV' || x.arquivado ? 'disabled' : ''}>Estornar</button><button class="btn" id="h-ref" ${x.dir === 'INV' || x.dir === 'EST' ? 'disabled' : ''}>Refazer na cesta</button></div>
   <div class="hint xs">Estornar cria um lançamento novo com os sinais invertidos e deixa este marcado. Nada é apagado.</div>`);
   const sh = $('#sheet');
-  sh.querySelector('#h-msg').onclick = () => { closeSheet(); openMsg(x, 'movsaldo'); };
+  sh.querySelector('#h-msg').onclick = () => { closeSheet(true); openMsg({ ...x, reenvio: true }, 'movsaldo'); };
   sh.querySelector('#h-est').onclick = async () => { closeSheet(true); if (!(await ask('Estornar lançamento', `Estornar o lançamento #${pad(x.seq)}? Os saldos voltam ao que eram.`, 'Estornar', true))) return; estornar(x); };
   sh.querySelector('#h-ref').onclick = () => { closeSheet(); S.cart = { dir: x.dir === 'AJ' ? 'AJ' : x.dir, motivo: x.motivo, canal: x.canal, obs: x.obs || '', accFull: false, itens: (x.itens || []).filter(it => it && !it.acc).map(it => ({ k: it.k, un: it.un || 0, cx: it.cx || 0, cxQ: it.cxUn || null, cxc: it.cxc || 0, kit: it.kit, kitQ: it.kitQ, novo: x.dir === 'AJ' ? it.novo : null, novoCx: x.dir === 'AJ' ? it.novoCx : null })) }; saveCart(); S.tab = 'lancar'; render(); };
 }
@@ -871,7 +906,7 @@ async function estornar(x, motivoExtra) {
   const jaEst = x.estornadoPor || todosMovs().some(m => m.estornaDe === x.id);
   if (jaEst) { toast(`#${pad(x.seq)} já foi estornado.`); return; }
   const ts = now();
-  const mov = { id: uid(), seq: S.seqMax + 1, ts, dia: new Date(ts).toISOString().slice(0, 10), dir: 'EST', motivo: 'Estorno', canal: '', obs: `Estorno do #${pad(x.seq)}${x.motivo ? ' (' + x.motivo + (x.canal ? ' · ' + x.canal : '') + ')' : ''}${motivoExtra ? ' · ' + motivoExtra : ''}`, autor: S.autor, estornaDe: x.id, estornaSeq: x.seq, itens: (x.itens || []).filter(it => it && x.dir !== 'INV' && (typeof it.d === 'number' || typeof it.dc === 'number')).map(it => { const o = { k: it.k, un: it.un, cx: it.cx, cxUn: it.cxUn, cxc: it.cxc || 0, d: -(it.d || 0), dc: -(it.dc || 0) }; if (it.abs) { o.abs = true; o.novo = it.esperado; o.novoCx = it.esperadoCx; o.esperado = it.novo; o.esperadoCx = it.novoCx; } if (it.kit) { o.kit = it.kit; o.kitQ = it.kitQ; } if (it.acc) o.acc = it.acc; return o; }), criadoEm: new Date(ts).toISOString() };
+  const mov = { id: uid(), seq: S.seqMax + 1, ts, dia: new Date(ts).toISOString().slice(0, 10), dir: 'EST', motivo: 'Estorno', canal: '', obs: `Estorno do #${pad(x.seq)}${x.motivo ? ' (' + x.motivo + (x.canal ? ' · ' + x.canal : '') + ')' : ''}${motivoExtra ? ' · ' + motivoExtra : ''}`, autor: S.autor, estornaDe: x.id, estornaSeq: x.seq, itens: (x.itens || []).filter(it => it && x.dir !== 'INV' && (typeof it.d === 'number' || typeof it.dc === 'number')).map(it => { const o = { k: it.k, un: it.un, cx: it.cx, cxUn: it.cxUn, cxc: it.cxc || 0, d: -(it.d || 0), dc: -(it.dc || 0) }; if (it.abs) { o.mostraNovo = it.esperado; o.mostraNovoCx = it.esperadoCx; o.esperado = it.novo; o.esperadoCx = it.novoCx; } if (it.kit) { o.kit = it.kit; o.kitQ = it.kitQ; } if (it.acc) o.acc = it.acc; return o; }), criadoEm: new Date(ts).toISOString() };
   if (!mov.itens.length) { toast('Nada a estornar nesse lançamento.'); return; }
   try { await putMov(mov); } catch (e) { toast('Não estornou: ' + erroTxt(e)); return; }
   S.movs[mov.id] = mov; recompute(); render(); openMsg(mov, 'movsaldo');
