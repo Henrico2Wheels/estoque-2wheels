@@ -203,6 +203,7 @@ pre.msg{margin:0;white-space:pre-wrap;word-break:break-word;font:14px/1.45 var(-
 .kitc .li{display:grid;grid-template-columns:1fr 84px 44px;gap:8px;align-items:center}
 .kitc input{min-height:44px;border-radius:10px;border:1px solid var(--bd);background:var(--sf2);text-align:center;font:700 18px var(--fd);width:100%}
 label.fl{font-size:13px;color:var(--mu);display:block;margin-bottom:-6px}
+@media (max-width:360px){.seg button{font-size:17px;gap:4px;padding:0 2px}main{padding:12px 10px 20px}.sheet{padding:12px 10px calc(16px + env(safe-area-inset-bottom,0px))}.brand small{display:none}}
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 @media (min-width:721px){#app{border-left:1px solid var(--bd);border-right:1px solid var(--bd)}}
 </style>
@@ -916,6 +917,7 @@ function openCfg() {
   <h3>Manutenção</h3>
   <div class="hint">Quando o histórico crescer, <b>Fechar período</b> compacta os lançamentos anteriores a uma data num único registro de arquivo (com os saldos daquele momento). O histórico continua visível; só deixa de ocupar um documento por lançamento.</div>
   <div class="row"><input class="textin grow" id="c-data" type="date" aria-label="Fechar até a data"><button class="btn" id="c-fechar">Fechar período</button></div>
+  ${S.mode === 'local' ? `<div class="hint">Este aparelho está com os dados só aqui, sem banco compartilhado — é assim que funciona a versão aberta, para conferir o app sem conta.</div><button class="btn dg w" id="c-zerar">Apagar tudo deste aparelho</button>` : ''}
   <div class="hint xs">Catálogo: loja Tray (web_api), tabela B2B 2026 e cadastro GS1 de códigos de barras. "Caixa cheia" é a caixa padrão de estoque; as unidades por caixa cheia são definidas por vocês tocando no produto na aba Estoque.</div>`);
   const sh = $('#sheet');
   sh.querySelector('#c-autor').onclick = () => openAutor();
@@ -924,6 +926,14 @@ function openCfg() {
   sh.querySelector('#c-min').onclick = () => openTabela('min');
   sh.querySelector('#c-csv').onclick = () => openCsv();
   sh.querySelector('#c-fechar').onclick = () => fecharPeriodo(sh.querySelector('#c-data').value);
+  const cz = sh.querySelector('#c-zerar');
+  if (cz) cz.onclick = async () => {
+    if (!(await ask('Apagar tudo deste aparelho', 'Apaga os lançamentos, os saldos e os ajustes gravados NESTE aparelho. Não mexe em nada de outra pessoa. Não dá para desfazer.', 'Apagar tudo', true))) return;
+    try { for (const k of ['local', 'cart', 'pend', 'contRasc']) localStorage.removeItem('e2w_' + k); } catch (e) { }
+    S.movs = {}; S.arqs = {}; S.cfgSkus = {}; S.cfgKits = {}; S.cfgGeral = {}; S.pend = []; S.contRasc = {};
+    S.cart = { dir: 'S', motivo: 'Venda', canal: 'Mercado Livre', obs: '', itens: [] }; saveCart();
+    recompute(); closeSheet(true); render(); toast('Tudo apagado neste aparelho');
+  };
 }
 function openKits() {
   sheet(`<div class="hd"><h2>Kits</h2><button class="xbtn" data-close aria-label="Fechar">✕</button></div><div class="hint">Toque num kit para conferir ou corrigir a composição. Kits com a etiqueta “a confirmar” não podem ser lançados até você salvar a composição.</div>
