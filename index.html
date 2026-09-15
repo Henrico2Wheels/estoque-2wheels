@@ -211,6 +211,58 @@ label.fl{font-size:13px;color:var(--mu);display:block;margin-bottom:-6px}
 @media (max-width:360px){.seg button{font-size:17px;gap:4px;padding:0 2px}main{padding:12px 10px 20px}.sheet{padding:12px 10px calc(16px + env(safe-area-inset-bottom,0px))}.brand small{display:none}}
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 @media (min-width:721px){#app{border-left:1px solid var(--bd);border-right:1px solid var(--bd)}}
+/* ===== mov1: movimento e carregamento (design-motion-principles) =====
+   Peso: Emil primario, Jakub secundario. O portao da frequencia decidiu o que
+   NAO anima: troca de aba, lista e cartao ficam instantaneos de proposito.
+   A regra de prefers-reduced-motion la de cima usa !important e vem antes,
+   entao tudo aqui ja nasce desligado pra quem pediu menos movimento. */
+:root{--mi:cubic-bezier(.16,1,.3,1);--mo:cubic-bezier(.4,0,1,1)}
+
+/* folha: entra de baixo, que e de onde ela vem. Saida mais curta que a
+   entrada -- na saida a atencao ja foi embora. Sem bounce: e acao utilitaria. */
+.scrim{opacity:0;transition:opacity .16s var(--mi)}
+.scrim.in{opacity:1}
+.scrim .sheet{transform:translateY(12px);opacity:0;will-change:transform,opacity;transition:transform .16s var(--mi),opacity .16s var(--mi)}
+.scrim.in .sheet{transform:none;opacity:1}
+.scrim.out{opacity:0;pointer-events:none;transition-duration:.12s;transition-timing-function:var(--mo)}
+.scrim.out .sheet{transform:translateY(6px);opacity:0;transition-duration:.12s;transition-timing-function:var(--mo)}
+
+/* aviso: preserva o translateX(-50%) que ele ja tem */
+.toast{opacity:0;transform:translate(-50%,-8px);transition:opacity .18s var(--mi),transform .18s var(--mi)}
+.toast.in{opacity:1;transform:translate(-50%,0)}
+.toast.out{opacity:0;transform:translate(-50%,-4px);transition-duration:.14s;transition-timing-function:var(--mo)}
+
+/* esqueleto da primeira carga. Nao e enfeite: sem ele o app abre com a tela
+   vazia enquanto o banco responde, e vazio parece quebrado. Brilho lento e de
+   baixo contraste, e ele morre assim que o dado chega -- nao e laco ambiente. */
+.sk{border-radius:8px;background:var(--sf2);position:relative;overflow:hidden}
+.sk::after{content:"";position:absolute;inset:0;transform:translateX(-100%);
+  background:linear-gradient(90deg,transparent,var(--sf3),transparent);
+  animation:skw 1.6s ease-in-out infinite}
+@keyframes skw{100%{transform:translateX(100%)}}
+.skrow{display:flex;align-items:center;gap:10px;padding:12px 10px;border-bottom:1px solid var(--bd)}
+.skth{width:44px;height:44px;flex:0 0 auto;border-radius:8px}
+.skgrow{flex:1;min-width:0}
+.skl{height:12px}
+.skl.w1{width:58%}
+.skl.w2{width:34%;margin-top:7px;height:10px}
+.sksd{width:54px;height:16px;flex:0 0 auto}
+
+/* botao trabalhando: barra fina andando na base. Nao e roda-gigante girando --
+   a espera aqui e de rede, entao o que informa e "ainda estou nisso". */
+.btn[aria-busy="true"]{position:relative;overflow:hidden}
+.btn[aria-busy="true"]::after{content:"";position:absolute;left:0;bottom:0;height:2px;width:38%;
+  background:currentColor;opacity:.5;animation:btnb 1.1s ease-in-out infinite}
+@keyframes btnb{0%{transform:translateX(-110%)}100%{transform:translateX(330%)}}
+
+/* estado da conexao: cruzamento curto, so pra o olho notar que mudou */
+.st span{transition:opacity .18s var(--mi)}
+.st.trocando span{opacity:.3}
+
+/* o "lazy" que esta lista precisa: 154 SKUs numa pagina so. O navegador
+   deixa de desenhar o que esta longe da tela. As miniaturas sao base64
+   embutido, entao loading="lazy" nelas nao faria nada. */
+.it,.hrow{content-visibility:auto;contain-intrinsic-size:auto 68px}
 </style>
 <div id="app">
   <header class="top">
@@ -298,7 +350,11 @@ function situacao(k) {
 }
 function skusVisiveis() { return CAT.skus.filter(s => ativo(s.k) || S.mostrarOcultos); }
 function thumb(k, lg) { const t = THUMBS[k]; if (t) return `<img class="th${lg ? ' lg' : ''}" src="${t}" alt="" loading="lazy">`; const s = SKU[k] || KIT[k]; return `<span class="th ph${lg ? ' lg' : ''}">${esc((s && s.n || '?').slice(0, 2).toUpperCase())}</span>`; }
-function toast(msg, act, fn) { const old = $('.toast'); if (old) old.remove(); const t = document.createElement('div'); t.className = 'toast'; t.setAttribute('role', 'status'); t.innerHTML = `<span>${esc(msg)}</span>${act ? `<button>${esc(act)}</button>` : ''}`; if (act) t.querySelector('button').onclick = () => { t.remove(); fn && fn(); }; document.body.appendChild(t); setTimeout(() => t.remove(), act ? 8000 : 3200); }
+function toast(msg, act, fn) { const old = $('.toast'); if (old) old.remove(); const t = document.createElement('div'); t.className = 'toast'; t.setAttribute('role', 'status'); t.innerHTML = `<span>${esc(msg)}</span>${act ? `<button>${esc(act)}</button>` : ''}`; if (act) t.querySelector('button').onclick = () => { t.remove(); fn && fn(); }; document.body.appendChild(t);
+  /* mov1 + mov2: offsetWidth forca o layout e a transicao dispara na hora.
+     rAF nao roda em aba oculta -- o aviso ficaria invisivel. */
+  void t.offsetWidth; t.classList.add('in');
+  setTimeout(() => { t.classList.remove('in'); t.classList.add('out'); setTimeout(() => t.remove(), 160); }, act ? 8000 : 3200); }
 /* saldo = unidades soltas + caixas cheias (caixa padrão de estoque) */
 function saldoDe(k) { return S.saldos[k]; }
 function saldoCxDe(k) { return S.saldosCx[k]; }
@@ -603,9 +659,27 @@ async function compartilhar(text) { if (navigator.share) { try { await navigator
 function renderStatus() {
   const el = $('#st'); if (!el) return;
   const map = { boot: ['', 'conectando…'], db: ['ok', 'sincronizado'], api: ['ok', 'sincronizado'], local: ['local', TEM_RUNTIME ? 'só neste aparelho' : 'neste navegador'], err: ['err', 'sem conexão'] };
-  const [cls, txt] = map[S.mode] || map.boot; el.className = 'st ' + cls; el.innerHTML = `<i></i><span>${esc(txt)}${S.autor ? ' · ' + esc(S.autor) : ''}</span>`;
+  const [cls, txt] = map[S.mode] || map.boot;
+  /* mov1: cruzamento curto quando o estado muda de verdade, e anuncio pro
+     leitor de tela -- perder conexao e informacao, nao enfeite. */
+  const novo = `<i></i><span>${esc(txt)}${S.autor ? ' · ' + esc(S.autor) : ''}</span>`;
+  if (el.innerHTML === novo) { el.className = 'st ' + cls; return; }
+  if (!el.getAttribute('aria-live')) { el.setAttribute('aria-live', 'polite'); }
+  el.classList.add('trocando');
+  setTimeout(() => { el.className = 'st ' + cls; el.innerHTML = novo; }, 120);
 }
-function render() { const m = $('#main'); if (!m) return; const y = window.scrollY; document.querySelectorAll('.tab').forEach(b => { const on = b.dataset.tab === S.tab; b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); }); ({ lancar: renderLancar, estoque: renderEstoque, historico: renderHistorico, contagem: renderContagem })[S.tab](m); window.scrollTo(0, y); }
+/* mov1: o que a tela mostra enquanto o banco compartilhado nao respondeu.
+   Sem isto o app abre vazio e passa a impressao de estar quebrado -- e o
+   unico lugar do app onde o usuario espera sem ter pedido nada. */
+function esqueleto() {
+  let linhas = '';
+  for (let i = 0; i < 7; i++) linhas += `<div class="skrow"><div class="sk skth"></div><div class="skgrow"><div class="sk skl w1"></div><div class="sk skl w2"></div></div><div class="sk sksd"></div></div>`;
+  return `<div aria-busy="true" aria-live="polite"><div class="row"><h2 class="grow">Carregando o estoque…</h2></div>${linhas}</div>`;
+}
+function render() { const m = $('#main'); if (!m) return; const y = window.scrollY; document.querySelectorAll('.tab').forEach(b => { const on = b.dataset.tab === S.tab; b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); }); /* mov1: enquanto e boot, esqueleto. Nos outros modos (db/api/local/err) o
+     app ja tem dado, mesmo que local, entao desenha de verdade. */
+  if (S.mode === 'boot') { m.innerHTML = esqueleto(); window.scrollTo(0, y); return; }
+  ({ lancar: renderLancar, estoque: renderEstoque, historico: renderHistorico, contagem: renderContagem })[S.tab](m); window.scrollTo(0, y); }
 const TEM_RUNTIME = !!(typeof window !== 'undefined' && window.claude && typeof window.claude.use === 'function');
 function bannerModo() {
   if (S.mode === 'api') return !S.autor ? `<div class="banner g">Diga quem está lançando: <button id="b-autor">definir meu nome</button>. Ele vai em todas as mensagens.</div>` : '';
@@ -836,7 +910,7 @@ async function confirmar() {
   }
   if (!itens.length) { toast('Nada a lançar: preencha as quantidades.'); return; }
   const mov = { id: uid(), seq, ts, dia: new Date(ts).toISOString().slice(0, 10), dir: c.dir, motivo: c.dir === 'AJ' ? 'Ajuste' : c.motivo, canal: c.canal || '', obs: (c.obs || '').trim(), autor: S.autor, itens, criadoEm: new Date(ts).toISOString() };
-  const btn = $('#confirm'); if (btn) { btn.disabled = true; btn.textContent = 'Salvando…'; }
+  const btn = $('#confirm'); if (btn) { btn.disabled = true; btn.textContent = 'Salvando…'; btn.setAttribute('aria-busy','true'); } /* mov1 */
   let r;
   try { r = await putMov(mov); } catch (e) { console.error(e); toast('Não salvou: ' + erroTxt(e)); render(); return; }
   S.movs[mov.id] = mov; recompute();
@@ -1043,7 +1117,7 @@ function renderContagem(m) {
     if (!itens.length) return;
     const inicial = itens.every(it => it.esperado == null && it.esperadoCx == null);
     const ts = now(); const mov = { id: uid(), seq: S.seqMax + 1, ts, dia: new Date(ts).toISOString().slice(0, 10), dir: 'INV', motivo: inicial ? 'Inventário inicial' : 'Contagem', inicial, canal: '', linha: S.contLinha, obs: '', autor: S.autor, itens, criadoEm: new Date(ts).toISOString() };
-    const btn = m.querySelector('#c-save'); btn.disabled = true; btn.textContent = 'Salvando…';
+    const btn = m.querySelector('#c-save'); btn.disabled = true; btn.textContent = 'Salvando…'; btn.setAttribute('aria-busy','true'); /* mov1 */
     try { await putMov(mov); } catch (e) { toast('Não salvou: ' + erroTxt(e)); render(); return; }
     S.movs[mov.id] = mov; recompute(); const p = {}; for (const s of rows) { p[s.k] = null; p['cx:' + s.k] = null; } await contSet(p); render(); openMsg(mov, 'mov');
   };
@@ -1165,8 +1239,23 @@ function ask(titulo, texto, okLabel, perigo) {
 }
 /* ---------- SHEET infra ---------- */
 let lastFocus = null, onCancel = null;
-function sheet(html, cancelCb) { const o = $('#overlay'); if (!o.querySelector('#sheet')) lastFocus = document.activeElement; onCancel = cancelCb || null; o.innerHTML = `<div class="scrim" id="scrim"><div class="sheet" id="sheet" role="dialog" aria-modal="true" aria-label="Janela">${html}</div></div>`; o.querySelector('#scrim').onclick = e => { if (e.target.id === 'scrim') closeSheet(); }; o.querySelectorAll('[data-close]').forEach(b => b.onclick = () => closeSheet()); document.body.style.overflow = 'hidden'; const h2 = o.querySelector('#sheet h2'); if (h2) o.querySelector('#sheet').setAttribute('aria-label', h2.textContent.trim()); }
-function closeSheet(semCancel) { const cb = onCancel; onCancel = null; $('#overlay').innerHTML = ''; document.body.style.overflow = ''; if (lastFocus && lastFocus.focus && document.contains(lastFocus)) { try { lastFocus.focus(); } catch (e) { } } lastFocus = null; if (cb && !semCancel) { try { cb(); } catch (e) { } } }
+function sheet(html, cancelCb) { const o = $('#overlay'); const jaAberta = !!o.querySelector('#sheet'); if (!jaAberta) lastFocus = document.activeElement; onCancel = cancelCb || null; o.innerHTML = `<div class="scrim" id="scrim"><div class="sheet" id="sheet" role="dialog" aria-modal="true" aria-label="Janela">${html}</div></div>`; o.querySelector('#scrim').onclick = e => { if (e.target.id === 'scrim') closeSheet(); }; o.querySelectorAll('[data-close]').forEach(b => b.onclick = () => closeSheet()); document.body.style.overflow = 'hidden';
+  /* mov1: se ja havia folha aberta (re-render do proprio conteudo), entra sem
+     animar -- animar de novo piscaria a cada digito. */
+  const _sc = o.querySelector('.scrim');
+  /* mov2: mesmo motivo do aviso -- sem rAF, senao a folha abre invisivel
+     quando a aba volta do segundo plano. */
+  if (_sc) { if (!jaAberta) void _sc.offsetWidth; _sc.classList.add('in'); }
+  const h2 = o.querySelector('#sheet h2'); if (h2) o.querySelector('#sheet').setAttribute('aria-label', h2.textContent.trim()); }
+function closeSheet(semCancel) { const cb = onCancel; onCancel = null;
+  /* mov1: tira o id ANTES de animar. Varios pontos do app perguntam $('#sheet')
+     pra saber se tem folha aberta (o apiPoll, por exemplo) -- se a folha
+     ficasse no DOM durante a saida, eles veriam folha aberta por 130ms. */
+  { const o = $('#overlay'); const sc = o.querySelector('.scrim');
+    if (sc) { const sh = sc.querySelector('#sheet'); if (sh) sh.removeAttribute('id');
+      sc.classList.remove('in'); sc.classList.add('out');
+      setTimeout(() => { if (sc.parentNode === o) o.innerHTML = ''; }, 140); }
+    else o.innerHTML = ''; } document.body.style.overflow = ''; if (lastFocus && lastFocus.focus && document.contains(lastFocus)) { try { lastFocus.focus(); } catch (e) { } } lastFocus = null; if (cb && !semCancel) { try { cb(); } catch (e) { } } }
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('#sheet')) closeSheet(); });
 /* ===================== BOOT ===================== */
 document.querySelectorAll('.tab').forEach(b => b.onclick = () => { S.tab = b.dataset.tab; if (S.tab !== 'historico') S.histQ = ''; closeSheet(); render(); window.scrollTo(0, 0); });
